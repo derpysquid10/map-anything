@@ -1,0 +1,17 @@
+{
+    "name": "vggt",
+    // "dockerFile": "docker/Dockerfile",
+    "dockerComposeFile": "../docker/docker-compose.yml",
+    "service": "vggt_mapanything",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "StopCompose",
+    // "appPort": [8000],
+    "extensions": [
+        "mutantdino.resourcemonitor",
+        "ms-azuretools.vscode-docker",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.black-formatter",
+        "ms-vscode.cpptools-extension-pack",
+    ]
+}

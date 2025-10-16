@@ -1,0 +1,43 @@
+services:
+
+  vggt_mapanything:
+    image: vggt_gtan1:v2
+    shm_size: 12G
+    container_name: vggt_mapanything
+    stdin_open: true
+    tty: true
+    ipc: host
+    network_mode: host
+    privileged: true
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      DISPLAY: $DISPLAY
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DISABLE_REQUIRE: true
+      USER: "${USER}"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ../:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /home:/home
+      - /tmp:/tmp
+      - /media:/media
+      - /mnt:/mnt
+      - /home/${USER}/.ssh:/home/${USER}/.ssh
+      - /home/${USER}/weights:/home/${USER}/weights
+      - /work:/work
+      - /work_node5:/work_node5
+      - /work_node6:/work_node6
+    working_dir: /workspace
+    command: /bin/bash
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
