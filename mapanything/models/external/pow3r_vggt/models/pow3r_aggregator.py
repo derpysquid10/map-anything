@@ -12,19 +12,19 @@ from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
 from pytorch3d.transforms import matrix_to_rotation_6d
 
-from vggt.layers import PatchEmbed
-from vggt.layers.block import Block
-from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
-from vggt.layers.prope_attention import _rope_precompute_coeffs, _prepare_apply_fns
-from vggt.layers.gta_attention import _prepare_apply_fns as _prepare_GTA_apply_fns
-from vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
+from pow3r_vggt.layers import PatchEmbed
+from pow3r_vggt.layers.block import Block
+from pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from pow3r_vggt.layers.prope_attention import _rope_precompute_coeffs, _prepare_apply_fns
+from pow3r_vggt.layers.gta_attention import _prepare_apply_fns as _prepare_GTA_apply_fns
+from pow3r_vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
 
 
-from vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion
-from vggt.utils.raymap import generate_raymap
-from vggt.utils.pose_enc import mat_to_quat
-from vggt.utils.rotation import normalize_camera_extrinsics_batch
+from pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion
+from pow3r_vggt.utils.raymap import generate_raymap
+from pow3r_vggt.utils.pose_enc import mat_to_quat
+from pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
 
 
 import pdb

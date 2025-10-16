@@ -8,14 +8,14 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
-from vggt.models.aggregator import Aggregator
-from vggt.heads.camera_head import CameraHead
-from vggt.heads.dpt_head import DPTHead
-from vggt.heads.track_head import TrackHead
-from vggt.heads.scale_head import ScaleHead, ScaleHead_Tr, ScaleHead_MoE
+from pow3r_vggt.models.aggregator import Aggregator
+from pow3r_vggt.heads.camera_head import CameraHead
+from pow3r_vggt.heads.dpt_head import DPTHead
+from pow3r_vggt.heads.track_head import TrackHead
+from pow3r_vggt.heads.scale_head import ScaleHead, ScaleHead_Tr, ScaleHead_MoE
 import numpy as np
 import torch.nn.functional as F
-from vggt.heads.caminfo_head import PoseEncoder, IntrinsicsEncoder
+from pow3r_vggt.heads.caminfo_head import PoseEncoder, IntrinsicsEncoder
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
