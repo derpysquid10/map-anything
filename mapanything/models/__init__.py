@@ -108,6 +108,10 @@ MODEL_CONFIGS = {
         "module": "mapanything.models.external.vggt",
         "class_name": "VGGTWrapper",
     },
+    "pow3r_vggt": {
+        "module": "mapanything.models.external.pow3r_vggt",
+        "class_name": "Pow3rVGGTWrapper",
+    },
     # Add other model classes here
 }
 

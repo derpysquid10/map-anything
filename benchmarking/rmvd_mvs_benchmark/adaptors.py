@@ -153,6 +153,8 @@ class RMVD_MAPA_Wrapper(torch.nn.Module):
                 )
 
                 view["ray_directions_cam"] = ray_directions
+                # Also store the intrinsics matrix for models that need it directly
+                view["intrinsics"] = current_intrinsics
 
             if poses is not None:
                 assert "pose" in self.inference_conditioning, (
