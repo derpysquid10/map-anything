@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from pow3r_vggt.layers import Mlp
-from pow3r_vggt.layers.block import Block
-from pow3r_vggt.heads.head_act import activate_pose
+from mapanything.models.external.pow3r_vggt.layers import Mlp
+from mapanything.models.external.pow3r_vggt.layers.block import Block
+from mapanything.models.external.pow3r_vggt.heads.head_act import activate_pose
 
 
 class CameraHead(nn.Module):

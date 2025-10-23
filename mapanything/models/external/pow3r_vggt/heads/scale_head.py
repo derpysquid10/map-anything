@@ -11,13 +11,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from pow3r_vggt.layers import Mlp
-from pow3r_vggt.layers.block import Block
-from pow3r_vggt.heads.head_act import activate_pose
+from mapanything.models.external.pow3r_vggt.layers import Mlp
+from mapanything.models.external.pow3r_vggt.layers.block import Block
+from mapanything.models.external.pow3r_vggt.heads.head_act import activate_pose
 from .modules import MLP
 import copy
 import time
-from pow3r_vggt.heads.FiLM import ResidualFiLM
+from mapanything.models.external.pow3r_vggt.heads.FiLM import ResidualFiLM
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

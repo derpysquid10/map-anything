@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
-from pow3r_vggt.models.pow3r_aggregator import Pow3rAggregator
-from pow3r_vggt.heads.camera_head import CameraHead
-from pow3r_vggt.heads.dpt_head import DPTHead
-from pow3r_vggt.heads.track_head import TrackHead
+from mapanything.models.external.pow3r_vggt.models.pow3r_aggregator import Pow3rAggregator
+from mapanything.models.external.pow3r_vggt.heads.camera_head import CameraHead
+from mapanything.models.external.pow3r_vggt.heads.dpt_head import DPTHead
+from mapanything.models.external.pow3r_vggt.heads.track_head import TrackHead
 
 class default_ablation():
     def __init__(self):

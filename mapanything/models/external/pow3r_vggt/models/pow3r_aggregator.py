@@ -10,21 +10,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
-from pytorch3d.transforms import matrix_to_rotation_6d
 
-from pow3r_vggt.layers import PatchEmbed
-from pow3r_vggt.layers.block import Block
-from pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
-from pow3r_vggt.layers.prope_attention import _rope_precompute_coeffs, _prepare_apply_fns
-from pow3r_vggt.layers.gta_attention import _prepare_apply_fns as _prepare_GTA_apply_fns
-from pow3r_vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
+# Conditional import for pytorch3d (only needed for 6D rotation encoding)
+try:
+    from pytorch3d.transforms import matrix_to_rotation_6d
+    HAS_PYTORCH3D = True
+except ImportError:
+    HAS_PYTORCH3D = False
+    matrix_to_rotation_6d = None
+
+from mapanything.models.external.pow3r_vggt.layers import PatchEmbed
+from mapanything.models.external.pow3r_vggt.layers.block import Block
+from mapanything.models.external.pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from mapanything.models.external.pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from mapanything.models.external.pow3r_vggt.layers.prope_attention import _rope_precompute_coeffs, _prepare_apply_fns
+from mapanything.models.external.pow3r_vggt.layers.gta_attention import _prepare_apply_fns as _prepare_GTA_apply_fns
+from mapanything.models.external.pow3r_vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
 
 
-from pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion
-from pow3r_vggt.utils.raymap import generate_raymap
-from pow3r_vggt.utils.pose_enc import mat_to_quat
-from pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
+from mapanything.models.external.pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion
+from mapanything.models.external.pow3r_vggt.utils.raymap import generate_raymap
+from mapanything.models.external.pow3r_vggt.utils.pose_enc import mat_to_quat
+from mapanything.models.external.pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
 
 
 import pdb
@@ -112,6 +119,13 @@ class Pow3rAggregator(nn.Module):
             print("using regular pose encoder")
             
         elif self.pose_encoder_type == "6D":
+            if not HAS_PYTORCH3D:
+                raise ImportError(
+                    "pytorch3d is required for 6D rotation encoding. "
+                    "Install it from source: "
+                    "git clone https://github.com/facebookresearch/pytorch3d.git && "
+                    "cd pytorch3d && git checkout v0.7.8 && pip install -e ."
+                )
             self.pose_encoder = PoseEncoder6D(embed_dim=pose_embed_dim)
             print("using 6D pose encoder")
 
@@ -432,7 +446,9 @@ class Pow3rAggregator(nn.Module):
          
             if self.pose_encoder_type in ["6D", "quaternion", "3x4"]:
                 if self.pose_encoder_type == "6D":
-                    poses = poses.view(B * S, 3, 4) 
+                    if not HAS_PYTORCH3D:
+                        raise ImportError("pytorch3d is required for 6D rotation encoding")
+                    poses = poses.view(B * S, 3, 4)
                     rotations = poses[:, :, :3]
                     translations = poses[:, :, 3]
                     rotation_6d = matrix_to_rotation_6d(rotations)

@@ -11,10 +11,10 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
 
-from pow3r_vggt.layers import PatchEmbed
-from pow3r_vggt.layers.block import Block
-from pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from mapanything.models.external.pow3r_vggt.layers import PatchEmbed
+from mapanything.models.external.pow3r_vggt.layers.block import Block
+from mapanything.models.external.pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from mapanything.models.external.pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
 

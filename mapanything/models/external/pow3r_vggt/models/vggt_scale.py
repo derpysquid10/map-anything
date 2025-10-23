@@ -8,15 +8,15 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
-from pow3r_vggt.models.aggregator import Aggregator
-from pow3r_vggt.heads.camera_head import CameraHead
-from pow3r_vggt.heads.dpt_head import DPTHead
-from pow3r_vggt.heads.track_head import TrackHead
-from pow3r_vggt.heads.scale_head import ScaleHead, ScaleHead_Tr, ScaleHead_MoE
+from mapanything.models.external.pow3r_vggt.models.aggregator import Aggregator
+from mapanything.models.external.pow3r_vggt.heads.camera_head import CameraHead
+from mapanything.models.external.pow3r_vggt.heads.dpt_head import DPTHead
+from mapanything.models.external.pow3r_vggt.heads.track_head import TrackHead
+from mapanything.models.external.pow3r_vggt.heads.scale_head import ScaleHead, ScaleHead_Tr, ScaleHead_MoE
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPModel
 import numpy as np
 import torch.nn.functional as F
-from pow3r_vggt.heads.caminfo_head import PoseEncoder, IntrinsicsEncoder
+from mapanything.models.external.pow3r_vggt.heads.caminfo_head import PoseEncoder, IntrinsicsEncoder
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
