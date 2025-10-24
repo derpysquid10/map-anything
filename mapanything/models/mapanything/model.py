@@ -36,6 +36,8 @@ from uniception.models.encoders import (
 from uniception.models.info_sharing.alternating_attention_transformer import (
     MultiViewAlternatingAttentionTransformer,
     MultiViewAlternatingAttentionTransformerIFR,
+    PRoPEMultiViewAlternatingAttentionTransformer,
+    PRoPEMultiViewAlternatingAttentionTransformerIFR,
 )
 from uniception.models.info_sharing.base import MultiViewTransformerInput
 from uniception.models.info_sharing.cross_attention_transformer import (
@@ -299,9 +301,13 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
                 self.info_sharing = MultiViewAlternatingAttentionTransformerIFR(
                     **info_sharing_config["module_args"]
                 )
+            elif self.info_sharing_type == "prope_alternating_attention":
+                self.info_sharing = PRoPEMultiViewAlternatingAttentionTransformerIFR(
+                    **info_sharing_config["module_args"]
+                )
             else:
                 raise ValueError(
-                    f"Invalid info_sharing_type: {self.info_sharing_type}. Valid options: ['cross_attention', 'global_attention', 'alternating_attention']"
+                    f"Invalid info_sharing_type: {self.info_sharing_type}. Valid options: ['cross_attention', 'global_attention', 'alternating_attention', 'prope_alternating_attention']"
                 )
             # Assess if the DPT needs to use encoder features
             if len(self.info_sharing.indices) == 2:
@@ -1130,6 +1136,105 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
 
         return all_encoder_features_across_views
 
+
+    
+    def _format_special_geometric_priors(self, views):
+        """
+        Format the special geometric priors for all the input views.
+
+        Args:
+            views (List[dict]): List of dictionaries containing the input views' images and instance information.
+
+        Returns:
+            dict: single dictionary containing the formatted special geometric priors for all the input where 
+            dictionary["intrinsics"] is a tensor of shape [B, S, 3, 3] containing the camera intrinsics for all the input views.
+            dictionary["extrinsics"] is a tensor of shape [B, S, 4, 4] containing the camera extrinsics for all the input views.
+            dictionary["img_H"] is the image height.
+            dictionary["img_W"] is the image width.
+            dictionary["patch_size"] is the patch size.
+        """
+        num_views = len(views)
+        batch_size_per_view, _, img_H, img_W = views[0]["img"].shape
+        device = self.device
+        dtype = self.dtype
+        
+        # Initialize output dictionary
+        geometric_priors = {
+            "img_H": img_H,
+            "img_W": img_W,
+            "patch_size": self.encoder.patch_size
+        }
+        
+        # Check if intrinsics or ray_directions are available in views
+        has_intrinsics_or_rays = any("intrinsics" in view or "ray_directions_cam" in view for view in views)
+        if has_intrinsics_or_rays:
+            # Import the utility function
+            from mapanything.utils.geometry import recover_pinhole_intrinsics_from_ray_directions
+            
+            # Collect intrinsics from all views
+            intrinsics_list = []
+            for view_idx in range(num_views):
+                if "intrinsics" in views[view_idx]:
+                    # Use provided intrinsics directly
+                    intrinsics_list.append(views[view_idx]["intrinsics"])
+                elif "ray_directions_cam" in views[view_idx]:
+                    # Recover intrinsics from ray directions
+                    ray_dirs = views[view_idx]["ray_directions_cam"]  # [B, H, W, 3]
+                    recovered_intrinsics = recover_pinhole_intrinsics_from_ray_directions(ray_dirs)
+                    intrinsics_list.append(recovered_intrinsics)
+                else:
+                    # Create identity intrinsics if neither available for this view
+                    identity_intrinsics = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size_per_view, 1, 1)
+                    intrinsics_list.append(identity_intrinsics)
+            
+            # Stack into [B, S, 3, 3] where S is num_views
+            intrinsics_tensor = torch.stack(intrinsics_list, dim=1)  # [B, S, 3, 3]
+            geometric_priors["intrinsics"] = intrinsics_tensor
+        
+        # Check if camera poses are available in views
+        has_camera_poses = any(("camera_pose_quats" in view and "camera_pose_trans" in view) for view in views)
+        if has_camera_poses:
+            # Collect extrinsics from all views
+            extrinsics_list = []
+            for view_idx in range(num_views):
+                if "camera_pose_quats" in views[view_idx] and "camera_pose_trans" in views[view_idx]:
+                    # Convert quaternions and translations to 4x4 extrinsic matrices
+                    quats = views[view_idx]["camera_pose_quats"]  # [B, 4]
+                    trans = views[view_idx]["camera_pose_trans"]  # [B, 3]
+                    
+                    # Convert quaternion to rotation matrix
+                    # Assuming quaternions are in [w, x, y, z] format
+                    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+                    
+                    # Compute rotation matrix from quaternion
+                    xx, yy, zz = x*x, y*y, z*z
+                    xy, xz, yz = x*y, x*z, y*z
+                    wx, wy, wz = w*x, w*y, w*z
+                    
+                    R = torch.stack([
+                        torch.stack([1 - 2*(yy + zz), 2*(xy - wz), 2*(xz + wy)], dim=1),
+                        torch.stack([2*(xy + wz), 1 - 2*(xx + zz), 2*(yz - wx)], dim=1),
+                        torch.stack([2*(xz - wy), 2*(yz + wx), 1 - 2*(xx + yy)], dim=1)
+                    ], dim=1)  # [B, 3, 3]
+                    
+                    # Create 4x4 extrinsic matrix
+                    extrinsic = torch.zeros(batch_size_per_view, 4, 4, device=device, dtype=dtype)
+                    extrinsic[:, :3, :3] = R
+                    extrinsic[:, :3, 3] = trans
+                    extrinsic[:, 3, 3] = 1.0
+                    
+                    extrinsics_list.append(extrinsic)
+                else:
+                    # Create identity extrinsics if not available for this view
+                    identity_extrinsics = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size_per_view, 1, 1)
+                    extrinsics_list.append(identity_extrinsics)
+            
+            # Stack into [B, S, 4, 4] where S is num_views
+            extrinsics_tensor = torch.stack(extrinsics_list, dim=1)  # [B, S, 4, 4]
+            geometric_priors["extrinsics"] = extrinsics_tensor
+        
+        return geometric_priors
+
     def _encode_and_fuse_optional_geometric_inputs(
         self, views, all_encoder_features_across_views_list
     ):
@@ -1519,6 +1624,11 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
                     views, all_encoder_features_across_views
                 )
             )
+            attention_geometric_priors = (
+                self._format_special_geometric_priors(
+                    views
+                )
+            )
 
         # Expand the scale token to match the batch size
         input_scale_token = (
@@ -1532,6 +1642,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         info_sharing_input = MultiViewTransformerInput(
             features=all_encoder_features_across_views,
             additional_input_tokens=input_scale_token,
+            additional_priors=attention_geometric_priors,
         )
         if self.info_sharing_return_type == "no_intermediate_features":
             final_info_sharing_multi_view_feat = self.info_sharing(info_sharing_input)
