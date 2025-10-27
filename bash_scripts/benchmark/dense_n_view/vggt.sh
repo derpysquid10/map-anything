@@ -28,7 +28,7 @@ for combo in "${batch_sizes_and_views[@]}"; do
 
     python3 \
         benchmarking/dense_n_view/benchmark.py \
-        machine=aws \
+        machine=default \
         dataset=$dataset \
         dataset.num_workers=12 \
         dataset.num_views=$num_views \

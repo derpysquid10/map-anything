@@ -36,8 +36,8 @@ from uniception.models.encoders import (
 from uniception.models.info_sharing.alternating_attention_transformer import (
     MultiViewAlternatingAttentionTransformer,
     MultiViewAlternatingAttentionTransformerIFR,
-    PRoPEMultiViewAlternatingAttentionTransformer,
-    PRoPEMultiViewAlternatingAttentionTransformerIFR,
+    # PRoPEMultiViewAlternatingAttentionTransformer,
+    # PRoPEMultiViewAlternatingAttentionTransformerIFR,
 )
 from uniception.models.info_sharing.base import MultiViewTransformerInput
 from uniception.models.info_sharing.cross_attention_transformer import (

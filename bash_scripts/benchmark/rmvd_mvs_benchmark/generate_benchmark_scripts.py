@@ -9,7 +9,7 @@ Generate bash scripts for RobustMVD Benchmark
 
 import os
 
-machine = "psc"
+machine = "default"
 self_folder = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -51,6 +51,18 @@ def get_model_settings(model: str, dataset: str):
             "evaluation_resolution": "\\${dataset.resolution_options.512_1_33_ar}"
             if dataset != "kitti"
             else "\\${dataset.resolution_options.512_3_20_ar}",
+        }
+    elif model == "pow3r_vggt":
+        return {
+            "model": "pow3r_vggt",
+            "evaluation_resolution": (
+                "\\${dataset.resolution_options.518_1_33_ar}"
+                if dataset != "kitti"
+                else "\\${dataset.resolution_options.518_3_20_ar}"
+            ),
+            # Uncomment and set path to use custom checkpoint:
+            # "model.model_config.load_custom_ckpt": "true",
+            # "model.model_config.custom_ckpt_path": "\"/path/to/your/checkpoint.pth\"",
         }
     else:
         raise ValueError(f"Unknown model: {model}")
@@ -163,6 +175,7 @@ if __name__ == "__main__":
             "moge_1",
             "moge_2",
             "vggt",
+            "pow3r_vggt",
             "mapanything",
         ]:
             generate_shell_for_single_experiment(
@@ -174,18 +187,19 @@ if __name__ == "__main__":
             )
 
         # conditioned on intrinsics
-        generate_shell_for_single_experiment(
-            model="mapanything",
-            dataset=dataset,
-            conditioning="image+intrinsics",
-            alignment="median",
-            view="single_view",
-        )
+        for model in ["mapanything", "pow3r_vggt"]:
+            generate_shell_for_single_experiment(
+                model=model,
+                dataset=dataset,
+                conditioning="image+intrinsics",
+                alignment="median",
+                view="single_view",
+            )
 
     # generate multi view with alignment experiments
     for dataset in ["kitti", "scannet"]:
         # non-conditioned
-        for model in ["vggt", "mapanything", "must3r"]:
+        for model in ["vggt", "pow3r_vggt", "mapanything", "must3r"]:
             generate_shell_for_single_experiment(
                 model=model,
                 dataset=dataset,
@@ -195,10 +209,21 @@ if __name__ == "__main__":
             )
 
         # conditioned on intrinsics
-        generate_shell_for_single_experiment(
-            model="mapanything",
-            dataset=dataset,
-            conditioning="image+intrinsics",
-            alignment="median",
-            view="multi_view",
-        )
+        for model in ["mapanything", "pow3r_vggt"]:
+            generate_shell_for_single_experiment(
+                model=model,
+                dataset=dataset,
+                conditioning="image+intrinsics",
+                alignment="median",
+                view="multi_view",
+            )
+
+        # conditioned on intrinsics and pose
+        for model in ["mapanything", "pow3r_vggt"]:
+            generate_shell_for_single_experiment(
+                model=model,
+                dataset=dataset,
+                conditioning="image+intrinsics+pose",
+                alignment="median",
+                view="multi_view",
+            )
