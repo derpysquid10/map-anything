@@ -173,3 +173,7 @@ cython_debug/
 
 # VSCode
 .vscode
+
+# Evaluation Results
+pc_sanity_vggt/
+depths_viz/

@@ -15,9 +15,15 @@ from typing import Optional, Tuple, Union, List, Dict, Any
 try:
     from pytorch3d.transforms import matrix_to_rotation_6d
     HAS_PYTORCH3D = True
-except ImportError:
+    print(f"[DEBUG] Successfully imported matrix_to_rotation_6d from pytorch3d")
+except ImportError as e:
     HAS_PYTORCH3D = False
     matrix_to_rotation_6d = None
+    print(f"[ERROR] Failed to import pytorch3d: {e}")
+except Exception as e:
+    HAS_PYTORCH3D = False
+    matrix_to_rotation_6d = None
+    print(f"[ERROR] Unexpected error importing pytorch3d: {e}")
 
 from mapanything.models.external.pow3r_vggt.layers import PatchEmbed
 from mapanything.models.external.pow3r_vggt.layers.block import Block
@@ -28,18 +34,17 @@ from mapanything.models.external.pow3r_vggt.layers.gta_attention import _prepare
 from mapanything.models.external.pow3r_vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
 
 
-from mapanything.models.external.pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion
-from mapanything.models.external.pow3r_vggt.utils.raymap import generate_raymap
+from mapanything.models.external.pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion, RaymapReprojectionLayer, ScaleEncoder
+from mapanything.models.external.pow3r_vggt.utils.raymap import generate_raymap, generate_unified_raymap
 from mapanything.models.external.pow3r_vggt.utils.pose_enc import mat_to_quat
 from mapanything.models.external.pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
-
-
-import pdb
-
+from mapanything.models.external.pow3r_vggt.utils.geometry import normalize_depth_values, normalize_pose_translations
 logger = logging.getLogger(__name__)
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
+
+
 
 
 
@@ -114,18 +119,11 @@ class Pow3rAggregator(nn.Module):
 
         print("="*50)
 
-        if self.pose_encoder_type == None or self.pose_encoder_type == "3x4":
+        if self.pose_encoder_type is None or self.pose_encoder_type == "3x4":
             self.pose_encoder = PoseEncoder(embed_dim=pose_embed_dim)
             print("using regular pose encoder")
             
         elif self.pose_encoder_type == "6D":
-            if not HAS_PYTORCH3D:
-                raise ImportError(
-                    "pytorch3d is required for 6D rotation encoding. "
-                    "Install it from source: "
-                    "git clone https://github.com/facebookresearch/pytorch3d.git && "
-                    "cd pytorch3d && git checkout v0.7.8 && pip install -e ."
-                )
             self.pose_encoder = PoseEncoder6D(embed_dim=pose_embed_dim)
             print("using 6D pose encoder")
 
@@ -145,6 +143,13 @@ class Pow3rAggregator(nn.Module):
 
         self.ray_encoder = RayEncoder()
         self.depth_encoder = DepthEncoder()
+        if "camray" in self.intrinsics_encoder_type:
+            self.raymap_reprojection_layer = RaymapReprojectionLayer()
+
+        if self.other_ablations.decompose_pose_scale: 
+            self.pose_scale_encoder = ScaleEncoder(embed_dim=pose_embed_dim)
+        if self.other_ablations.decompose_depth_scale: 
+            self.depth_scale_encoder = ScaleEncoder()
         
 
         self.frame_blocks = nn.ModuleList(
@@ -382,7 +387,9 @@ class Pow3rAggregator(nn.Module):
         self,
         images: torch.Tensor,
         intrinsics: torch.Tensor = None,
-        depths: torch.Tensor = None,
+        depths: torch.Tensor = None,  # Deprecated: kept for backward compatibility
+        depths_z: torch.Tensor = None,
+        depths_along_ray: torch.Tensor = None,
         poses=None,
     ) -> Tuple[List[torch.Tensor], int]:
         """
@@ -425,34 +432,133 @@ class Pow3rAggregator(nn.Module):
         
 
         if intrinsics is not None:
+
+            # First reshape images back to (B, S, C, H, W) for raymap generation
+            images_for_raymap = images.view(B, S, C_in, H, W)
+
+            if "origin" in self.intrinsics_encoder_type:
+                raymap_format = "origin"
+            elif "plucker" in self.intrinsics_encoder_type:
+                raymap_format = "plucker"
+            else:
+                raymap_format = "no_origin"
+            
+            # Generate raymaps - returns (B, S, 6, H, W)
+            normalize_raymap = getattr(self.other_ablations, 'normalize_raymap', True)
+            ray_images = generate_unified_raymap(images_for_raymap, intrinsics, extrinsics=poses, raymap_format=raymap_format, normalize=normalize_raymap)
+            # ray_images = generate_raymap(images, intrinsics, normalize=True)
+            
+            # Reshape to (B*S, 6, H, W) for the encoder
+            ray_images = ray_images.view(B * S, 3, H, W)
+            ray_embeddings, pos = self.ray_encoder(ray_images)
+
             if "raymap" in self.intrinsics_encoder_type:
                 print(f"using raymap encoder")
-                # First reshape images back to (B, S, C, H, W) for raymap generation
-                images_for_raymap = images.view(B, S, C_in, H, W)
-                
-                # Generate raymaps - returns (B, S, 3, H, W)
-                ray_images = generate_raymap(images_for_raymap, intrinsics)
-                
-                # Reshape to (B*S, 3, H, W) for the encoder
-                ray_images = ray_images.view(B * S, 3, H, W)
-                ray_embeddings, pos = self.ray_encoder(ray_images)
+
                 patch_tokens += ray_embeddings
+            
+            elif "camray" in self.intrinsics_encoder_type:
+                print(f"using camray encoder")
+              
+                # Concatenate patch tokens with ray embeddings along the embedding dimension
+                # patch_tokens: (B*S, P, C), ray_embeddings: (B*S, P, C)
+                patch_tokens = torch.cat([patch_tokens, ray_embeddings], dim=2)  # (B*S, P, 2*C)
+
+                # Project concatenated embeddings back to C dimensions
+                patch_tokens = self.raymap_reprojection_layer(patch_tokens)  # (B*S, P, C)
+
             else:
                 print("No intrinsics encoder used.")
 
 
         if poses is not None:
             poses = poses.to(next(self.parameters()).device)
+
+            if self.other_ablations.decompose_pose_scale:
+                # isolate the translations from the B, S, 3, 4 pose tensor
+                translations = poses[:, :, :, 3]  # [B, S, 3] - extract translation columns
+                rotations = poses[:, :, :, :3]   # [B, S, 3, 3] - extract rotation part
+                
+                # Normalize the pose translations by the average norm of the non-zero pose translations per batch scene
+                normalized_translations, norm_factors = normalize_pose_translations(translations, return_norm_factor=True)
+                
+                # store the normalized translations as the new translations in the poses tensor
+                poses = torch.cat([rotations, normalized_translations.unsqueeze(-1)], dim=-1)  # [B, S, 3, 4]
+                
+                # take the log of the normalizing scale factor, add small epsilon, then encode using pose_scale_encoder
+                log_scale_factors = torch.log(norm_factors + 1e-8)  # [B] - add epsilon for numerical stability
+                log_scale_factors = log_scale_factors.unsqueeze(-1)  # [B, 1] for encoder input
+                
+                # Expand to match B*S for encoding
+                log_scale_factors_expanded = log_scale_factors.unsqueeze(1).expand(B, S, 1).reshape(B*S, 1)  # [B*S, 1]
+                
+                pose_scale_encodings = self.pose_scale_encoder(log_scale_factors_expanded)  # [B*S, embed_dim]
+                
+                # add pose scale encodings to the camera tokens
+                if self.encode_pose_in_register:
+                    pose_scale_encodings = pose_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    # Add to first register token (could be customized)
+                    register_token[:, 0:1, :] += pose_scale_encodings
+                else:
+                    pose_scale_encodings = pose_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    camera_token += pose_scale_encodings
          
             if self.pose_encoder_type in ["6D", "quaternion", "3x4"]:
+                print(f"[DEBUG] pose_encoder_type: {self.pose_encoder_type}")
+                print(f"[DEBUG] poses is None: {poses is None}")
+                if poses is not None:
+                    print(f"[DEBUG] poses shape: {poses.shape}")
+                
                 if self.pose_encoder_type == "6D":
-                    if not HAS_PYTORCH3D:
-                        raise ImportError("pytorch3d is required for 6D rotation encoding")
-                    poses = poses.view(B * S, 3, 4)
+                    if poses is None:
+                        print(f"[ERROR] poses is None but pose_encoder_type is 6D!")
+                        return None, None
+                    
+                    poses = poses.view(B * S, 3, 4) 
                     rotations = poses[:, :, :3]
                     translations = poses[:, :, 3]
-                    rotation_6d = matrix_to_rotation_6d(rotations)
-                    poses = torch.cat([rotation_6d, translations], dim=1)
+                    print(f"[DEBUG] rotations shape: {rotations.shape}")
+                    print(f"[DEBUG] rotations is None: {rotations is None}")
+                    
+                    # Check rotation matrix validity
+                    print(f"[DEBUG] rotations min/max values: {rotations.min().item():.6f} / {rotations.max().item():.6f}")
+                    
+                    # Check if rotations contain NaN or inf
+                    has_nan = torch.isnan(rotations).any()
+                    has_inf = torch.isinf(rotations).any()
+                    print(f"[DEBUG] rotations has NaN: {has_nan}, has inf: {has_inf}")
+                    
+                    if has_nan or has_inf:
+                        print(f"[ERROR] rotations contain NaN or inf values, cannot convert to 6D")
+                        # Use identity rotations as fallback
+                        rotations = torch.eye(3, device=rotations.device, dtype=rotations.dtype).unsqueeze(0).repeat(B * S, 1, 1)
+                        print(f"[DEBUG] Using identity rotations as fallback")
+                    
+                    # Check determinant (should be close to 1 for rotation matrices)
+                    det = torch.det(rotations)
+                    print(f"[DEBUG] rotation determinants min/max: {det.min().item():.6f} / {det.max().item():.6f}")
+                    
+                    # Debug tensor properties before calling matrix_to_rotation_6d
+                    print(f"[DEBUG] rotations dtype: {rotations.dtype}")
+                    print(f"[DEBUG] rotations device: {rotations.device}")
+                    print(f"[DEBUG] rotations requires_grad: {rotations.requires_grad}")
+                    print(f"[DEBUG] rotations is_contiguous: {rotations.is_contiguous()}")
+                    
+                    # Ensure tensor is in the right format for pytorch3d
+                    rotations = rotations.contiguous().float()
+                    print(f"[DEBUG] After contiguous() - is_contiguous: {rotations.is_contiguous()}")
+                    
+                    try:
+                        rotation_6d = matrix_to_rotation_6d(rotations)
+                        poses = torch.cat([rotation_6d, translations], dim=1)
+                        print(f"[DEBUG] Successfully converted to 6D rotation")
+                    except Exception as e:
+                        print(f"[ERROR] matrix_to_rotation_6d failed with error: {str(e)}")
+                        print(f"[ERROR] Error type: {type(e).__name__}")
+                        # Fallback: use manual 6D conversion
+                        rotation_6d = rotations[:, :, :2].reshape(B * S, 6)  # First 2 columns
+                        poses = torch.cat([rotation_6d, translations], dim=1)
+                        print(f"[DEBUG] Using manual 6D conversion as fallback")
 
                 elif self.pose_encoder_type == "quaternion":
                     poses = poses.view(B * S, 3, 4) 
@@ -475,12 +581,74 @@ class Pow3rAggregator(nn.Module):
             # else:
             #     print(f"Pose encoder type '{self.pose_encoder_type}' not supported, skipping pose encoding.")
 
-        if depths is not None: # TODO: add ray depth encodings
+        # Handle depth input - choose between z-depth and depth-along-ray based on ablation config
+        depths_to_use = None
+        
+        # Backward compatibility: if old 'depths' parameter is used, treat as z-depth
+        if depths is not None:
+            depths_to_use = depths
+            print(f"[Pow3rAggregator] Using backward compatibility 'depths' parameter (treated as z-depth), shape: {depths.shape}")
+        else:
+            # Use ablation config to choose between depth types
+            normalize_raymap = getattr(self.other_ablations, 'normalize_raymap', True)
+            print(f"[Pow3rAggregator] normalize_raymap setting: {normalize_raymap}")
+            print(f"[Pow3rAggregator] depths_z available: {depths_z is not None}, depths_along_ray available: {depths_along_ray is not None}")
+            
+            if normalize_raymap and depths_along_ray is not None:
+                # Use depth along ray for normalized raymaps
+                depths_to_use = depths_along_ray
+                print(f"[Pow3rAggregator] ✓ Using depth_along_ray (normalize_raymap=True), shape: {depths_along_ray.shape}")
+            elif not normalize_raymap and depths_z is not None:
+                # Use z-depth for non-normalized raymaps
+                depths_to_use = depths_z
+                print(f"[Pow3rAggregator] ✓ Using depth_z (normalize_raymap=False), shape: {depths_z.shape}")
+            elif depths_along_ray is not None:
+                # Fallback to depth along ray if available
+                depths_to_use = depths_along_ray
+                print(f"[Pow3rAggregator] ✓ Fallback to depth_along_ray (preferred depth type unavailable), shape: {depths_along_ray.shape}")
+            elif depths_z is not None:
+                # Fallback to z-depth if available
+                depths_to_use = depths_z
+                print(f"[Pow3rAggregator] ✓ Fallback to depth_z (preferred depth type unavailable), shape: {depths_z.shape}")
+            else:
+                print(f"[Pow3rAggregator] ⚠️  No depth information available - skipping depth conditioning")
+        
+        if depths_to_use is not None:
             # Add channel dimension and reshape from (B, S, H, W) to (B*S, 1, H, W)
-            depths = depths.unsqueeze(2)  # (B, S, 1, H, W)
-            depths = depths.view(B * S, 1, H, W)
-            depth_encodings, _ = self.depth_encoder(depths)
+            depths_final = depths_to_use.unsqueeze(2)  # (B, S, 1, H, W)
+            
+            # Apply depth scale decomposition if enabled
+            if self.other_ablations.decompose_depth_scale:
+                # Normalize the depth values by the average of the non-zero depth values per batch scene
+                normalized_depths, depth_norm_factors = normalize_depth_values(depths_final, return_norm_factor=True)
+                
+                # Update depths with normalized values
+                depths_final = normalized_depths
+                
+                # Take the log of the normalizing scale factor, add small epsilon, then encode using depth_scale_encoder
+                log_depth_scale_factors = torch.log(depth_norm_factors + 1e-8)  # [B] - add epsilon for numerical stability
+                log_depth_scale_factors = log_depth_scale_factors.unsqueeze(-1)  # [B, 1] for encoder input
+                
+                # Expand to match B*S for encoding
+                log_depth_scale_factors_expanded = log_depth_scale_factors.unsqueeze(1).expand(B, S, 1).reshape(B*S, 1)  # [B*S, 1]
+                
+                depth_scale_encodings = self.depth_scale_encoder(log_depth_scale_factors_expanded)  # [B*S, embed_dim]
+                
+                # Add depth scale encodings to the camera tokens
+                if self.encode_pose_in_register:
+                    depth_scale_encodings = depth_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    # Add to second register token (could be customized)
+                    register_token[:, 1:2, :] += depth_scale_encodings
+                else:
+                    depth_scale_encodings = depth_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    camera_token += depth_scale_encodings
+            
+            depths_final = depths_final.view(B * S, 1, H, W)
+            print(f"[Pow3rAggregator] Final depth tensor for encoding - shape: {depths_final.shape}, min: {depths_final.min():.4f}, max: {depths_final.max():.4f}, mean: {depths_final.mean():.4f}")
+            # encode the depths
+            depth_encodings, _ = self.depth_encoder(depths_final)
             patch_tokens += depth_encodings
+            print(f"[Pow3rAggregator] Depth encodings applied to patch tokens - encoding shape: {depth_encodings.shape}")
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
@@ -539,7 +707,6 @@ class Pow3rAggregator(nn.Module):
                 # - register_token: [B*S, num_register_tokens, C] 
                 # - patch_tokens: [B*S, num_patch_tokens, C]
                 
-                num_register_tokens = self.register_token.shape[2]  # Get from the original parameter
                 
                 # Extract different token types
                 tokens = tokens.view(B * S, -1, C)  # Reshape to [B*S, 1+num_register_tokens, num_patch_tokens, C]

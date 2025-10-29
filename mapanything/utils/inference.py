@@ -80,6 +80,7 @@ def loss_of_one_batch_multi_view(
         ignore_keys = set(
             [
                 "depthmap",
+                "depth_z",
                 "dataset",
                 "label",
                 "instance",
@@ -249,7 +250,8 @@ def preprocess_input_views_for_inference(
             pts3d_cam = depth_z[..., None] * ray_directions_unit_plane
             depth_along_ray = torch.norm(pts3d_cam, dim=-1, keepdim=True)
             processed_view["depth_along_ray"] = depth_along_ray
-            del processed_view["depth_z"]
+            # Keep both depth_z and depth_along_ray available
+            processed_view["depth_z"] = depth_z
 
         # Step 3: Convert camera_poses to expected input keys
         if "camera_poses" in view:

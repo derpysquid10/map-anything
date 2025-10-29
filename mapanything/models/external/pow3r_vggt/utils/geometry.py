@@ -222,7 +222,6 @@ def project_world_points_to_cam(
     device = world_points.device
     # with torch.autocast(device_type=device.type, dtype=torch.double):
     with torch.autocast(device_type=device.type, enabled=False):
-        N = world_points.shape[0]  # Number of points
         B = cam_extrinsics.shape[0]  # Batch size, i.e., number of cameras
         world_points_homogeneous = torch.cat(
             [world_points, torch.ones_like(world_points[..., 0:1])], dim=1
@@ -316,9 +315,102 @@ def cam_from_img(pred_tracks, intrinsics, extra_params=None):
             tracks_normalized = iterative_undistortion(
                 extra_params, tracks_normalized
             )
-        except:
+        except Exception:
             tracks_normalized = single_undistortion(
                 extra_params, tracks_normalized
             )
 
     return tracks_normalized
+
+
+def normalize_pose_translations(pose_translations, return_norm_factor=False):
+    """
+    Normalize the pose translations by the average norm of the non-zero pose translations per batch.
+
+    Args:
+        pose_translations (torch.Tensor): Pose translations tensor of size [B, S, 3]. 
+                                         B is the batch size, S is the sequence length (number of views).
+    Returns:
+        normalized_pose_translations (torch.Tensor): Normalized pose translations tensor of size [B, S, 3].
+        norm_factor (torch.Tensor): Norm factor tensor of size [B] (only if return_norm_factor=True).
+    """
+    assert pose_translations.ndim == 3 and pose_translations.shape[2] == 3
+    B, S, _ = pose_translations.shape
+    
+    # Compute distance of all pose translations to origin
+    pose_translations_dis = pose_translations.norm(dim=-1)  # [B, S]
+    non_zero_pose_translations_dis = pose_translations_dis > 1e-6  # [B, S] - use small epsilon
+    
+    # Calculate the average norm of the translations across all views per batch (considering only views with non-zero translations)
+    sum_of_all_views_pose_translations = pose_translations_dis.sum(dim=1)  # [B]
+    count_of_all_views_with_non_zero_pose_translations = non_zero_pose_translations_dis.sum(dim=1)  # [B]
+    
+    # Avoid division by zero
+    norm_factor = sum_of_all_views_pose_translations / (count_of_all_views_with_non_zero_pose_translations + 1e-8)  # [B]
+    
+    # Ensure norm_factor is at least epsilon to avoid numerical issues
+    norm_factor = norm_factor.clamp(min=1e-8)
+    
+    # Normalize the pose translations by the norm factor
+    # Expand norm_factor to [B, 1, 1] to broadcast correctly
+    normalized_pose_translations = pose_translations / norm_factor.unsqueeze(1).unsqueeze(2)  # [B, S, 3]
+    
+    # Create the output tuple
+    if return_norm_factor:
+        return normalized_pose_translations, norm_factor
+    else:
+        return normalized_pose_translations
+
+
+def normalize_depth_values(depth_values, return_norm_factor=False):
+    """
+    Normalize the depth values by the average of the non-zero depth values per batch.
+
+    Args:
+        depth_values (torch.Tensor): Depth tensor of size [B, S, 1, H, W]. 
+                                    B is the batch size, S is the sequence length (number of views).
+    Returns:
+        normalized_depth_values (torch.Tensor): Normalized depth values tensor of size [B, S, 1, H, W].
+        norm_factor (torch.Tensor): Norm factor tensor of size [B] (only if return_norm_factor=True).
+    """
+    assert depth_values.ndim == 5 and depth_values.shape[2] == 1
+    B, S, _, H, W = depth_values.shape
+    
+    # Flatten spatial dimensions for easier processing: [B, S, H*W]
+    depth_flat = depth_values.squeeze(2).view(B, S, H * W)  # [B, S, H*W]
+    
+    # Find non-zero depth values (with small epsilon to avoid numerical issues)
+    non_zero_depth_mask = depth_flat > 1e-6  # [B, S, H*W]
+    
+    # Calculate the average depth across all views and pixels per batch (considering only non-zero depths)
+    batch_norm_factors = []
+    normalized_depth_flat = torch.zeros_like(depth_flat)
+    
+    for b in range(B):
+        # Get depths for this batch
+        batch_depths = depth_flat[b]  # [S, H*W]
+        batch_mask = non_zero_depth_mask[b]  # [S, H*W]
+        
+        if batch_mask.any():
+            # Calculate average of all non-zero depths in this batch
+            avg_depth = batch_depths[batch_mask].mean()
+            batch_norm_factors.append(avg_depth)
+            
+            # Normalize all depths by this factor
+            normalized_depth_flat[b] = batch_depths / avg_depth
+        else:
+            # If no non-zero depths, use scale factor of 1
+            batch_norm_factors.append(torch.tensor(1.0, device=depth_values.device))
+            normalized_depth_flat[b] = batch_depths
+    
+    # Stack norm factors and ensure minimum value
+    norm_factor = torch.stack(batch_norm_factors).clamp(min=1e-8)  # [B]
+    
+    # Reshape back to original dimensions
+    normalized_depth_values = normalized_depth_flat.view(B, S, H, W).unsqueeze(2)  # [B, S, 1, H, W]
+    
+    # Create the output tuple
+    if return_norm_factor:
+        return normalized_depth_values, norm_factor
+    else:
+        return normalized_depth_values

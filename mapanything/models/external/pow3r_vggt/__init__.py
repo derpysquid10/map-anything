@@ -179,7 +179,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         # Extract optional conditioning inputs if provided by RMVD adapter
         intrinsics = None
         poses = None
-        depths = None
+        depths_z = None
+        depths_along_ray = None
 
         # Check if intrinsics are provided (RMVD adapter now stores both rays and intrinsics)
         if "intrinsics" in views[0]:
@@ -190,8 +191,15 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 intrinsics_list.append(K)
             intrinsics = torch.stack(intrinsics_list, dim=1)  # (B, V, 3, 3)
 
+        # Initialize poses as None
+        poses = None
+        
+        # Debug: Print available keys in first view
+        print(f"[DEBUG] Available keys in views[0]: {list(views[0].keys())}")
+        
         # Check if poses are provided (RMVD provides trans + quats)
         if "camera_pose_trans" in views[0] and "camera_pose_quats" in views[0]:
+            print(f"[DEBUG] Found camera_pose_trans and camera_pose_quats format")
             # Convert from translation + quaternion to 3x4 matrix format
             # RMVD provides poses in the format expected by MapAnything models
             from mapanything.models.external.pow3r_vggt.utils.rotation import quat_to_mat
@@ -205,6 +213,40 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 pose_3x4 = torch.cat([rot_mat, trans.unsqueeze(-1)], dim=-1)  # (B, 3, 4)
                 pose_matrices.append(pose_3x4)
             poses = torch.stack(pose_matrices, dim=1)  # (B, V, 3, 4)
+            print(f"[DEBUG] Created poses from trans+quats, shape: {poses.shape}")
+        elif "extrinsics" in views[0]:
+            print(f"[DEBUG] Found extrinsics format")
+            # Check if poses are provided as extrinsics matrices
+            extrinsics_list = []
+            for view in views:
+                ext = view["extrinsics"]  # Should be (B, 4, 4) or (B, 3, 4)
+                if ext.shape[-2:] == (4, 4):
+                    # Convert 4x4 to 3x4 by dropping last row
+                    ext = ext[:, :3, :]  # (B, 3, 4)
+                extrinsics_list.append(ext)
+            poses = torch.stack(extrinsics_list, dim=1)  # (B, V, 3, 4)
+            print(f"[DEBUG] Created poses from extrinsics, shape: {poses.shape}")
+        else:
+            print(f"[DEBUG] No pose data found - poses will be None")
+
+        # Extract depth information if available
+        if "depth_z" in views[0]:
+            # Extract z-depths from views
+            depth_z_list = []
+            for view in views:
+                depth_z = view["depth_z"]  # (B, H, W, 1)
+                depth_z = depth_z.squeeze(-1)  # (B, H, W)
+                depth_z_list.append(depth_z)
+            depths_z = torch.stack(depth_z_list, dim=1)  # (B, V, H, W)
+
+        if "depth_along_ray" in views[0]:
+            # Extract depth-along-ray from views
+            depth_along_ray_list = []
+            for view in views:
+                depth_along_ray = view["depth_along_ray"]  # (B, H, W, 1)
+                depth_along_ray = depth_along_ray.squeeze(-1)  # (B, H, W)
+                depth_along_ray_list.append(depth_along_ray)
+            depths_along_ray = torch.stack(depth_along_ray_list, dim=1)  # (B, V, H, W)
 
         # Run the Pow3r-VGGT aggregator with conditioning
         with torch.autocast("cuda", dtype=self.dtype):
@@ -212,7 +254,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 images=images,
                 intrinsics=intrinsics,
                 poses=poses,
-                depths=depths
+                depths_z=depths_z,
+                depths_along_ray=depths_along_ray
             )
 
         # Run the Camera + Pose Branch and Depth Branch

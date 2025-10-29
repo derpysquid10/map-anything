@@ -255,6 +255,7 @@ def train_one_epoch(
         ignore_keys = set(
             [
                 "depthmap",
+                "depth_z",
                 "dataset",
                 "label",
                 "instance",

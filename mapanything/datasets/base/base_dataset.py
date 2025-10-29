@@ -535,6 +535,9 @@ class BaseDataset(EasyDataset):
             view["depth_along_ray"] = depth_along_ray
             view["ray_directions_cam"] = ray_directions_cam
             view["pts3d_cam"] = pts3d_cam
+            
+            # Preserve the original z-depth from depthmap
+            view["depth_z"] = view["depthmap"].copy()
 
             # Compute the prior depth along ray if present
             if "prior_depth_z" in view:
@@ -567,6 +570,7 @@ class BaseDataset(EasyDataset):
             assert view["depthmap"].shape == view["pts3d"].shape[:2]
             assert view["depthmap"].shape == view["valid_mask"].shape
             assert view["depthmap"].shape == view["depth_along_ray"].shape[:2]
+            assert view["depthmap"].shape == view["depth_z"].shape
             assert view["depthmap"].shape == view["ray_directions_cam"].shape[:2]
             assert view["depthmap"].shape == view["pts3d_cam"].shape[:2]
             if "prior_depth_along_ray" in view:
@@ -574,8 +578,9 @@ class BaseDataset(EasyDataset):
             if "non_ambiguous_mask" in view:
                 assert view["depthmap"].shape == view["non_ambiguous_mask"].shape
 
-            # Expand the last dimension of the depthmap
+            # Expand the last dimension of the depthmap and depth_z
             view["depthmap"] = view["depthmap"][..., None]
+            view["depth_z"] = view["depth_z"][..., None]
 
             # Append RNG state to the views, this allows to check whether the RNG is in the same state each time
             view["rng"] = int.from_bytes(self._rng.bytes(4), "big")
@@ -601,6 +606,9 @@ class BaseDataset(EasyDataset):
             )
             assert np.isfinite(view["depth_along_ray"]).all(), (
                 f"NaN in depth_along_ray for view {view_name(view)}"
+            )
+            assert np.isfinite(view["depth_z"]).all(), (
+                f"NaN in depth_z for view {view_name(view)}"
             )
             assert np.isfinite(view["ray_directions_cam"]).all(), (
                 f"NaN in ray_directions_cam for view {view_name(view)}"

@@ -47,7 +47,7 @@ class PoseEncoderQuaternion(nn.Module):
 
 
 class RayEncoder(nn.Module):
-    def __init__(self,  patch_size=14, in_chans=3, embed_dim=1024, norm_layer=None, flatten=True, position_getter=None):
+    def __init__(self,  patch_size=14, in_chans=6, embed_dim=1024, norm_layer=None, flatten=True, position_getter=None):
         super().__init__()
         
         # Store parameters
@@ -212,3 +212,41 @@ if __name__ == "__main__": # Tests and Sanity Checks
     pose_encodings = pose_encoder(my_tensor)
     pose_encodings = pose_encodings.unsqueeze(1)
     print(f"Shape of pose encodings: {pose_encodings.shape}")
+
+
+class RaymapReprojectionLayer(nn.Module):
+    """
+    A simple MLP that projects concatenated patch and ray embeddings
+    from dimension 2048 to 1024.
+    """
+    def __init__(self, in_dim=2048, embed_dim=1024):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 4 * embed_dim),
+            nn.GELU(),
+            nn.Linear(4 * embed_dim, embed_dim)
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (B*S, P, 2*embed_dim) - concatenated patch and ray embeddings
+        Returns:
+            Tensor of shape (B*S, P, embed_dim) - projected embeddings
+        """
+        return self.mlp(x)
+
+
+class ScaleEncoder(nn.Module):
+    def __init__(self, in_dim=1, embed_dim=1024):
+        super().__init__()
+
+        self.encoder = nn.Sequential(
+            nn.Linear(in_dim, 4*embed_dim),
+            nn.GELU(),
+            nn.Linear(4*embed_dim, embed_dim)
+        )
+
+    def forward(self, x, **kw):
+        return self.encoder(x)
