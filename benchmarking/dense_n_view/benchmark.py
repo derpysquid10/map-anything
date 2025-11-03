@@ -19,6 +19,8 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from omegaconf import DictConfig, OmegaConf
+from PIL import Image
+from plyfile import PlyData, PlyElement
 
 from mapanything.datasets import get_test_data_loader
 from mapanything.models import init_model
@@ -40,6 +42,191 @@ from mapanything.utils.metrics import (
 from mapanything.utils.misc import StreamToLogger
 
 log = logging.getLogger(__name__)
+
+
+def save_pointcloud_ply(points, filename, colors=None):
+    """
+    Save pointcloud as PLY file.
+
+    Args:
+        points (np.ndarray): Nx3 array of 3D points
+        filename (str): Output PLY filename
+        colors (np.ndarray, optional): Nx3 array of RGB colors (0-255)
+    """
+    # Ensure points are numpy array
+    if isinstance(points, torch.Tensor):
+        points = points.cpu().numpy()
+    points = points.astype(np.float32)
+
+    # Create vertex data
+    if colors is not None:
+        if isinstance(colors, torch.Tensor):
+            colors = colors.cpu().numpy()
+        colors = colors.astype(np.uint8)
+        vertex_dtype = [
+            ("x", "f4"),
+            ("y", "f4"),
+            ("z", "f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ]
+        vertex_data = np.zeros(len(points), dtype=vertex_dtype)
+        vertex_data["x"] = points[:, 0]
+        vertex_data["y"] = points[:, 1]
+        vertex_data["z"] = points[:, 2]
+        vertex_data["red"] = colors[:, 0]
+        vertex_data["green"] = colors[:, 1]
+        vertex_data["blue"] = colors[:, 2]
+    else:
+        vertex_dtype = [("x", "f4"), ("y", "f4"), ("z", "f4")]
+        vertex_data = np.zeros(len(points), dtype=vertex_dtype)
+        vertex_data["x"] = points[:, 0]
+        vertex_data["y"] = points[:, 1]
+        vertex_data["z"] = points[:, 2]
+
+    # Create PLY element and write file
+    vertex_element = PlyElement.describe(vertex_data, "vertex")
+    ply_data = PlyData([vertex_element], text=False)
+
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    ply_data.write(filename)
+
+
+def save_depth_image_jpg(depth_array, filename, mask=None):
+    """
+    Save a depth array as a JPG image with proper normalization.
+
+    Args:
+        depth_array (np.ndarray): HxW depth array
+        filename (str): Output JPG filename
+        mask (np.ndarray, optional): HxW boolean mask for valid pixels
+    """
+    # Ensure depth_array is numpy array and 2D
+    if isinstance(depth_array, torch.Tensor):
+        depth_array = depth_array.cpu().numpy()
+
+    # Handle different shapes - squeeze out singleton dimensions but keep at least 2D
+    while depth_array.ndim > 2:
+        depth_array = depth_array.squeeze()
+
+    if depth_array.ndim == 1:
+        # If 1D, we can't visualize it, skip saving
+        print(f"Warning: Cannot save 1D depth array to {filename}")
+        return
+
+    # Create a copy to avoid modifying original
+    depth_viz = depth_array.copy().astype(np.float64)
+
+    if mask is not None:
+        # Ensure mask is numpy array and same shape
+        if isinstance(mask, torch.Tensor):
+            mask = mask.cpu().numpy()
+        while mask.ndim > 2:
+            mask = mask.squeeze()
+
+        # Resize mask to match depth if needed
+        if mask.shape != depth_viz.shape:
+            print(
+                f"Warning: mask shape {mask.shape} doesn't match depth shape {depth_viz.shape}"
+            )
+            mask = None
+        else:
+            # Set invalid pixels to NaN for proper visualization
+            depth_viz[~mask] = np.nan
+
+    # Remove NaN and infinite values for normalization
+    valid_depths = depth_viz[np.isfinite(depth_viz)]
+
+    if len(valid_depths) == 0:
+        # If no valid depths, create a black image
+        depth_viz_normalized = np.zeros_like(depth_viz)
+    else:
+        # Normalize to 0-1 range using valid depth percentiles for robust normalization
+        min_depth = np.percentile(valid_depths, 1)  # 1st percentile
+        max_depth = np.percentile(valid_depths, 99)  # 99th percentile
+
+        if max_depth == min_depth:
+            # Handle constant depth case
+            depth_viz_normalized = np.ones_like(depth_viz) * 0.5
+        else:
+            # Clip and normalize
+            depth_viz_clipped = np.clip(depth_viz, min_depth, max_depth)
+            depth_viz_normalized = (depth_viz_clipped - min_depth) / (
+                max_depth - min_depth
+            )
+
+        # Set invalid pixels to 0 (black)
+        depth_viz_normalized[~np.isfinite(depth_viz)] = 0
+
+    # Apply viridis colormap for better depth visualization
+    import matplotlib.cm as cm
+
+    viridis_cmap = cm.get_cmap("viridis")
+    depth_viz_colored = viridis_cmap(
+        depth_viz_normalized
+    )  # Returns RGBA values in [0,1]
+
+    # Convert to RGB (drop alpha channel) and scale to 0-255
+    depth_viz_rgb = (depth_viz_colored[:, :, :3] * 255).astype(np.uint8)
+
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    try:
+        Image.fromarray(depth_viz_rgb, mode="RGB").save(filename)
+    except Exception as e:
+        print(f"Error saving depth image {filename}: {e}")
+        print(f"Depth array shape: {depth_array.shape}, dtype: {depth_array.dtype}")
+        print(f"Final RGB shape: {depth_viz_rgb.shape}, dtype: {depth_viz_rgb.dtype}")
+
+
+def median_align_depth(pred_depth, gt_depth, mask=None, return_scale=False):
+    """
+    Align predicted depth to ground truth depth using median alignment.
+
+    Args:
+        pred_depth (np.ndarray): Predicted depth map
+        gt_depth (np.ndarray): Ground truth depth map
+        mask (np.ndarray, optional): Valid mask for pixels
+        return_scale (bool): Whether to return the scale factor
+
+    Returns:
+        np.ndarray or tuple: Median-aligned predicted depth, optionally with scale factor
+    """
+    if mask is not None:
+        valid_pred = pred_depth[mask]
+        valid_gt = gt_depth[mask]
+    else:
+        valid_pred = pred_depth.flatten()
+        valid_gt = gt_depth.flatten()
+
+    # Remove invalid values (zeros, nans, infs)
+    valid_indices = (
+        (valid_pred > 0)
+        & (valid_gt > 0)
+        & np.isfinite(valid_pred)
+        & np.isfinite(valid_gt)
+    )
+
+    if np.sum(valid_indices) == 0:
+        scale = 1.0
+        aligned_pred_depth = pred_depth
+    else:
+        valid_pred = valid_pred[valid_indices]
+        valid_gt = valid_gt[valid_indices]
+
+        # Compute median alignment scale
+        scale = np.median(valid_gt) / np.median(valid_pred)
+
+        # Apply scale to entire predicted depth map
+        aligned_pred_depth = pred_depth * scale
+
+    if return_scale:
+        return aligned_pred_depth, scale
+    else:
+        return aligned_pred_depth
 
 
 def get_all_info_for_metric_computation(batch, preds, norm_mode="avg_dis"):
@@ -385,6 +572,8 @@ def benchmark(args):
                 "pose_auc_5": [],
                 "z_depth_abs_rel": [],
                 "z_depth_inlier_thres_103": [],
+                "aligned_z_depth_abs_rel": [],
+                "aligned_z_depth_inlier_thres_103": [],
                 "ray_dirs_err_deg": [],
             }
 
@@ -399,7 +588,6 @@ def benchmark(args):
             ignore_keys = set(
                 [
                     "depthmap",
-                    "depth_z",
                     "dataset",
                     "label",
                     "instance",
@@ -437,6 +625,8 @@ def benchmark(args):
                 pointmaps_inlier_thres_103_across_views = []
                 z_depth_abs_rel_across_views = []
                 z_depth_inlier_thres_103_across_views = []
+                aligned_z_depth_abs_rel_across_views = []
+                aligned_z_depth_inlier_thres_103_across_views = []
                 ray_dirs_err_deg_across_views = []
 
                 gt_poses_curr_set = []
@@ -450,6 +640,47 @@ def benchmark(args):
                         pred=pr_info["pts3d"][view_idx][batch_idx].numpy(),
                         mask=valid_mask_curr_view,
                     )
+
+                    # save gt info and pred info pts3d overlapping ply files.
+                    # to /home/binbin/gtan/map-anything/benchmarking/pc_sanity
+                    pc_sanity_dir = (
+                        "/home/binbin/gtan/map-anything/benchmarking/pc_sanity_vggt"
+                    )
+                    os.makedirs(pc_sanity_dir, exist_ok=True)
+
+                    # Create directory for depth visualization
+                    depths_viz_dir = (
+                        "/home/binbin/gtan/map-anything/benchmarking/depths_viz"
+                    )
+                    os.makedirs(depths_viz_dir, exist_ok=True)
+
+                    # Get valid points for both GT and predicted
+                    gt_pts_valid = gt_info["pts3d"][view_idx][batch_idx].numpy()[
+                        valid_mask_curr_view
+                    ]
+                    pred_pts_valid = pr_info["pts3d"][view_idx][batch_idx].numpy()[
+                        valid_mask_curr_view
+                    ]
+
+                    # Save GT + Original Predicted pointcloud (GT in green, pred in red)
+                    gt_colors = np.full(
+                        (len(gt_pts_valid), 3), [0, 255, 0], dtype=np.uint8
+                    )  # Green
+                    pred_colors = np.full(
+                        (len(pred_pts_valid), 3), [255, 0, 0], dtype=np.uint8
+                    )  # Red
+                    gt_pred_original_pts = np.vstack([gt_pts_valid, pred_pts_valid])
+                    gt_pred_original_colors = np.vstack([gt_colors, pred_colors])
+                    gt_pred_original_filename = os.path.join(
+                        pc_sanity_dir,
+                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_pred_original.ply",
+                    )
+                    save_pointcloud_ply(
+                        gt_pred_original_pts,
+                        gt_pred_original_filename,
+                        gt_pred_original_colors,
+                    )
+
                     pointmaps_inlier_thres_103_curr_view = thresh_inliers(
                         gt=gt_info["pts3d"][view_idx][batch_idx].numpy(),
                         pred=pr_info["pts3d"][view_idx][batch_idx].numpy(),
@@ -467,6 +698,77 @@ def benchmark(args):
                         mask=valid_mask_curr_view,
                         thresh=1.03,
                     )
+
+                    # align each depth map using median alignment and then calculate the absrel and inliers again. Save the results/metrics in "aligned_{metric}""
+
+                    # Get current z_depths for alignment
+                    gt_z_depth_curr_view = gt_info["z_depths"][view_idx][
+                        batch_idx
+                    ].numpy()
+                    pred_z_depth_curr_view = pr_info["z_depths"][view_idx][
+                        batch_idx
+                    ].numpy()
+
+                    # Apply median alignment to predicted z_depth and get scale factor
+                    aligned_pred_z_depth_curr_view, scale_factor = median_align_depth(
+                        pred_z_depth_curr_view,
+                        gt_z_depth_curr_view,
+                        mask=valid_mask_curr_view,
+                        return_scale=True,
+                    )
+
+                    # Calculate aligned z_depth metrics
+                    aligned_z_depth_abs_rel_curr_view = m_rel_ae(
+                        gt=gt_z_depth_curr_view,
+                        pred=aligned_pred_z_depth_curr_view,
+                        mask=valid_mask_curr_view,
+                    )
+                    aligned_z_depth_inlier_thres_103_curr_view = thresh_inliers(
+                        gt=gt_z_depth_curr_view,
+                        pred=aligned_pred_z_depth_curr_view,
+                        mask=valid_mask_curr_view,
+                        thresh=1.03,
+                    )
+
+                    # Save ground truth and aligned predicted depth images as JPG
+                    gt_depth_filename = os.path.join(
+                        depths_viz_dir,
+                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_depth.jpg",
+                    )
+                    aligned_pred_depth_filename = os.path.join(
+                        depths_viz_dir,
+                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_aligned_pred_depth.jpg",
+                    )
+
+                    save_depth_image_jpg(
+                        gt_z_depth_curr_view,
+                        gt_depth_filename,
+                        mask=valid_mask_curr_view,
+                    )
+                    save_depth_image_jpg(
+                        aligned_pred_z_depth_curr_view,
+                        aligned_pred_depth_filename,
+                        mask=valid_mask_curr_view,
+                    )
+
+                    # Save the absolute relative error depth map using viridis colormap
+                    # Handle division by zero by masking out zero/invalid ground truth values
+                    gt_nonzero_mask = (gt_z_depth_curr_view > 0) & np.isfinite(gt_z_depth_curr_view)
+                    absrel_depth_map = np.zeros_like(gt_z_depth_curr_view)
+                    absrel_depth_map[gt_nonzero_mask] = (
+                        np.abs(aligned_pred_z_depth_curr_view[gt_nonzero_mask] - gt_z_depth_curr_view[gt_nonzero_mask])
+                        / gt_z_depth_curr_view[gt_nonzero_mask]
+                    )
+                    absrel_depth_filename = os.path.join(
+                        depths_viz_dir,
+                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_absrel_depth.jpg",
+                    )
+                    save_depth_image_jpg(
+                        absrel_depth_map,
+                        absrel_depth_filename,
+                        mask=valid_mask_curr_view,
+                    )
+
                     pointmaps_abs_rel_across_views.append(pointmaps_abs_rel_curr_view)
                     pointmaps_inlier_thres_103_across_views.append(
                         pointmaps_inlier_thres_103_curr_view
@@ -474,6 +776,12 @@ def benchmark(args):
                     z_depth_abs_rel_across_views.append(z_depth_abs_rel_curr_view)
                     z_depth_inlier_thres_103_across_views.append(
                         z_depth_inlier_thres_103_curr_view
+                    )
+                    aligned_z_depth_abs_rel_across_views.append(
+                        aligned_z_depth_abs_rel_curr_view
+                    )
+                    aligned_z_depth_inlier_thres_103_across_views.append(
+                        aligned_z_depth_inlier_thres_103_curr_view
                     )
 
                     # Compute the l2 norm of the ray directions and convert it to angular error in degrees
@@ -502,6 +810,12 @@ def benchmark(args):
                 z_depth_abs_rel_curr_set = np.mean(z_depth_abs_rel_across_views)
                 z_depth_inlier_thres_103_curr_set = np.mean(
                     z_depth_inlier_thres_103_across_views
+                )
+                aligned_z_depth_abs_rel_curr_set = np.mean(
+                    aligned_z_depth_abs_rel_across_views
+                )
+                aligned_z_depth_inlier_thres_103_curr_set = np.mean(
+                    aligned_z_depth_inlier_thres_103_across_views
                 )
                 ray_dirs_err_deg_curr_set = np.mean(ray_dirs_err_deg_across_views)
 
@@ -555,6 +869,12 @@ def benchmark(args):
                 )
                 per_scene_results[scene]["z_depth_inlier_thres_103"].append(
                     z_depth_inlier_thres_103_curr_set.item()
+                )
+                per_scene_results[scene]["aligned_z_depth_abs_rel"].append(
+                    aligned_z_depth_abs_rel_curr_set.item()
+                )
+                per_scene_results[scene]["aligned_z_depth_inlier_thres_103"].append(
+                    aligned_z_depth_inlier_thres_103_curr_set.item()
                 )
                 per_scene_results[scene]["ray_dirs_err_deg"].append(
                     ray_dirs_err_deg_curr_set.item()

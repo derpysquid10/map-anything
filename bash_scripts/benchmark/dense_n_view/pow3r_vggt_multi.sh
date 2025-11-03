@@ -9,11 +9,11 @@ export HYDRA_FULL_ERROR=1
 
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    "10 2 benchmark_518_eth3d_snpp_tav2"
-    "10 4 benchmark_518_eth3d_snpp_tav2"
+    # "10 2 benchmark_518_eth3d_snpp_tav2"
+    # "10 4 benchmark_518_eth3d_snpp_tav2"
     "10 8 benchmark_518_eth3d_snpp_tav2"
-    "5 16 benchmark_518_eth3d_snpp_tav2"
-    "4 24 benchmark_518_eth3d_snpp_tav2"
+    # "5 16 benchmark_518_eth3d_snpp_tav2"
+    # "4 24 benchmark_518_eth3d_snpp_tav2"
     # "2 32 benchmark_518_eth3d_snpp_tav2"
     # "1 50 benchmark_518_eth3d_snpp_tav2"
     # "1 100 benchmark_518_eth3d_snpp_tav2"
@@ -36,9 +36,9 @@ for combo in "${batch_sizes_and_views[@]}"; do
         model=pow3r_vggt \
         amp=0 \
         model.model_config.load_custom_ckpt=true \
-        model.model_config.custom_ckpt_path="/work/weights/pow3r_vggt/multi_6D_KRay_argoverse/checkpoint_0.pt" \
-        +model/task=nmp \
-        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/pow3r_vggt_multi'
+        model.model_config.custom_ckpt_path="/mnt/nfs/binbin/gtan_weights/multi_origin_no_depth/checkpoint_0.pt" \
+        +model/task=non_metric_poses_non_metric_depth_sparse \
+        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/multi_origin_no_depth'
 
     echo "Finished running $dataset with batch_size=$batch_size and num_views=$num_views"
 done

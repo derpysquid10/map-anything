@@ -5,17 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from typing import List, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from typing import Optional, Tuple, Union, List, Dict, Any
 
 # Conditional import for pytorch3d (only needed for 6D rotation encoding)
 try:
     from pytorch3d.transforms import matrix_to_rotation_6d
+
     HAS_PYTORCH3D = True
-    print(f"[DEBUG] Successfully imported matrix_to_rotation_6d from pytorch3d")
+    print("[DEBUG] Successfully imported matrix_to_rotation_6d from pytorch3d")
 except ImportError as e:
     HAS_PYTORCH3D = False
     matrix_to_rotation_6d = None
@@ -27,25 +28,48 @@ except Exception as e:
 
 from mapanything.models.external.pow3r_vggt.layers import PatchEmbed
 from mapanything.models.external.pow3r_vggt.layers.block import Block
-from mapanything.models.external.pow3r_vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from mapanything.models.external.pow3r_vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
-from mapanything.models.external.pow3r_vggt.layers.prope_attention import _rope_precompute_coeffs, _prepare_apply_fns
-from mapanything.models.external.pow3r_vggt.layers.gta_attention import _prepare_apply_fns as _prepare_GTA_apply_fns
-from mapanything.models.external.pow3r_vggt.layers.cape_attention import _prepare_apply_fns as _prepare_cape_apply_fns
-
-
-from mapanything.models.external.pow3r_vggt.layers.prior_encoders import RayEncoder, DepthEncoder, PoseEncoder, PoseEncoder6D, PoseEncoderQuaternion, RaymapReprojectionLayer, ScaleEncoder
-from mapanything.models.external.pow3r_vggt.utils.raymap import generate_raymap, generate_unified_raymap
+from mapanything.models.external.pow3r_vggt.layers.cape_attention import (
+    _prepare_apply_fns as _prepare_cape_apply_fns,
+)
+from mapanything.models.external.pow3r_vggt.layers.gta_attention import (
+    _prepare_apply_fns as _prepare_GTA_apply_fns,
+)
+from mapanything.models.external.pow3r_vggt.layers.prior_encoders import (
+    DepthEncoder,
+    PoseEncoder,
+    PoseEncoder6D,
+    PoseEncoderQuaternion,
+    RayEncoder,
+    RaymapReprojectionLayer,
+    ScaleEncoder,
+)
+from mapanything.models.external.pow3r_vggt.layers.prope_attention import (
+    _prepare_apply_fns,
+    _rope_precompute_coeffs,
+)
+from mapanything.models.external.pow3r_vggt.layers.rope import (
+    PositionGetter,
+    RotaryPositionEmbedding2D,
+)
+from mapanything.models.external.pow3r_vggt.layers.vision_transformer import (
+    vit_base,
+    vit_giant2,
+    vit_large,
+    vit_small,
+)
+from mapanything.models.external.pow3r_vggt.utils.geometry import (
+    normalize_depth_values,
+    normalize_pose_translations,
+)
 from mapanything.models.external.pow3r_vggt.utils.pose_enc import mat_to_quat
-from mapanything.models.external.pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
-from mapanything.models.external.pow3r_vggt.utils.geometry import normalize_depth_values, normalize_pose_translations
+from mapanything.models.external.pow3r_vggt.utils.raymap import (
+    generate_unified_raymap,
+)
+
 logger = logging.getLogger(__name__)
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
-
-
-
 
 
 class Pow3rAggregator(nn.Module):
@@ -95,20 +119,28 @@ class Pow3rAggregator(nn.Module):
         qk_norm=True,
         rope_freq=100,
         init_values=0.01,
-        ablation=None
+        ablation=None,
     ):
         super().__init__()
 
-        self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
+        self.__build_patch_embed__(
+            patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim
+        )
 
         # Initialize rotary position embedding if frequency > 0
-        self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 and ablation.use_vggt_rope is True else None
+        self.rope = (
+            RotaryPositionEmbedding2D(frequency=rope_freq)
+            if rope_freq > 0 and ablation.use_vggt_rope is True
+            else None
+        )
         self.position_getter = PositionGetter() if self.rope is not None else None
-        
+
         self.pose_encoder_type = ablation.pose_encoder_type
         self.intrinsics_encoder_type = ablation.intrinsics_encoder_type
         self.skip_connections = ablation.skip_connections
-        self.special_attention_skip_connections = ablation.special_attention_skip_connections
+        self.special_attention_skip_connections = (
+            ablation.special_attention_skip_connections
+        )
         self.encode_pose_in_register = ablation.encode_pose_in_register
         self.head_dim = embed_dim // num_heads
         self.other_ablations = ablation
@@ -117,12 +149,12 @@ class Pow3rAggregator(nn.Module):
 
         pose_embed_dim = 4096 if self.encode_pose_in_register else 1024
 
-        print("="*50)
+        print("=" * 50)
 
         if self.pose_encoder_type is None or self.pose_encoder_type == "3x4":
             self.pose_encoder = PoseEncoder(embed_dim=pose_embed_dim)
             print("using regular pose encoder")
-            
+
         elif self.pose_encoder_type == "6D":
             self.pose_encoder = PoseEncoder6D(embed_dim=pose_embed_dim)
             print("using 6D pose encoder")
@@ -137,20 +169,19 @@ class Pow3rAggregator(nn.Module):
 
         else:
             print(f"{self.pose_encoder_type} not valid, resorting to 3x4 pose encoder")
-            
+
             self.pose_encoder = PoseEncoder(embed_dim=pose_embed_dim)
-        print("="*50)
+        print("=" * 50)
 
         self.ray_encoder = RayEncoder()
         self.depth_encoder = DepthEncoder()
         if "camray" in self.intrinsics_encoder_type:
             self.raymap_reprojection_layer = RaymapReprojectionLayer()
 
-        if self.other_ablations.decompose_pose_scale: 
+        if self.other_ablations.decompose_pose_scale:
             self.pose_scale_encoder = ScaleEncoder(embed_dim=pose_embed_dim)
-        if self.other_ablations.decompose_depth_scale: 
+        if self.other_ablations.decompose_depth_scale:
             self.depth_scale_encoder = ScaleEncoder()
-        
 
         self.frame_blocks = nn.ModuleList(
             [
@@ -193,14 +224,18 @@ class Pow3rAggregator(nn.Module):
 
         # Validate that depth is divisible by aa_block_size
         if self.depth % self.aa_block_size != 0:
-            raise ValueError(f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})")
+            raise ValueError(
+                f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})"
+            )
 
         self.aa_block_num = self.depth // self.aa_block_size
 
         # Note: We have two camera tokens, one for the first frame and one for the rest
         # The same applies for register tokens
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
-        self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
+        self.register_token = nn.Parameter(
+            torch.randn(1, 2, num_register_tokens, embed_dim)
+        )
 
         # The patch tokens start after the camera and register tokens
         self.patch_start_idx = 1 + num_register_tokens
@@ -210,10 +245,15 @@ class Pow3rAggregator(nn.Module):
         nn.init.normal_(self.register_token, std=1e-6)
 
         # Register normalization constants as buffers
-        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
-            self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
+        for name, value in (
+            ("_resnet_mean", _RESNET_MEAN),
+            ("_resnet_std", _RESNET_STD),
+        ):
+            self.register_buffer(
+                name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False
+            )
 
-        self.use_reentrant = False # hardcoded to False
+        self.use_reentrant = False  # hardcoded to False
 
     def __build_patch_embed__(
         self,
@@ -233,7 +273,12 @@ class Pow3rAggregator(nn.Module):
         """
 
         if "conv" in patch_embed:
-            self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
+            self.patch_embed = PatchEmbed(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_chans=3,
+                embed_dim=embed_dim,
+            )
         else:
             vit_models = {
                 "dinov2_vitl14_reg": vit_large,
@@ -259,14 +304,14 @@ class Pow3rAggregator(nn.Module):
     def setup_prope(self, poses, intrinsics, H, W, tokens_per_image, B):
         """
         Setup PRoPE (Projected RoPE) encoding arguments.
-        
+
         Args:
             poses (torch.Tensor): Camera poses [B,S , 3, 4]
             intrinsics (torch.Tensor): Camera intrinsics [B, S, 3, 3]
             H, W (int): Image height and width
             tokens_per_image (int): Number of tokens per image
             B (int): Batch size
-            
+
         Returns:
             Dict: PRoPE arguments for attention blocks
         """
@@ -298,8 +343,6 @@ class Pow3rAggregator(nn.Module):
         bottom_row = bottom_row.expand(B, S, 1, 4)
         prope_input_poses = torch.cat([poses, bottom_row], dim=2)  # (B, S, 4, 4)
 
-        
-
         # Prepare apply functions for query, key-value, and output projections
         apply_fn_q, apply_fn_kv, apply_fn_o = _prepare_apply_fns(
             head_dim=self.head_dim,
@@ -320,11 +363,11 @@ class Pow3rAggregator(nn.Module):
             "tokens_per_image": tokens_per_image,
             "batch_size": B,
         }
-    
+
     def setup_cape(self, poses, tokens_per_image, B):
         """
         Setup GTA encoding arguments.
-        
+
         Args:
             poses (torch.Tensor): Camera poses [B,S , 3, 4]
 
@@ -355,7 +398,7 @@ class Pow3rAggregator(nn.Module):
     def setup_gta(self, poses, tokens_per_image, B):
         """
         Setup GTA encoding arguments.
-        
+
         Args:
             poses (torch.Tensor): Camera poses [B,S , 3, 4]
 
@@ -404,7 +447,6 @@ class Pow3rAggregator(nn.Module):
         """
         B, S, C_in, H, W = images.shape
 
-
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
@@ -429,10 +471,8 @@ class Pow3rAggregator(nn.Module):
         ray_embeddings = None
         pose_encodings = None
         depth_encodings = None
-        
 
         if intrinsics is not None:
-
             # First reshape images back to (B, S, C, H, W) for raymap generation
             images_for_raymap = images.view(B, S, C_in, H, W)
 
@@ -442,253 +482,349 @@ class Pow3rAggregator(nn.Module):
                 raymap_format = "plucker"
             else:
                 raymap_format = "no_origin"
-            
+
             # Generate raymaps - returns (B, S, 6, H, W)
-            normalize_raymap = getattr(self.other_ablations, 'normalize_raymap', True)
-            ray_images = generate_unified_raymap(images_for_raymap, intrinsics, extrinsics=poses, raymap_format=raymap_format, normalize=normalize_raymap)
+            normalize_raymap = getattr(self.other_ablations, "normalize_raymap", True)
+            ray_images = generate_unified_raymap(
+                images_for_raymap,
+                intrinsics,
+                extrinsics=poses,
+                raymap_format=raymap_format,
+                normalize=normalize_raymap,
+            )
             # ray_images = generate_raymap(images, intrinsics, normalize=True)
-            
+
             # Reshape to (B*S, 6, H, W) for the encoder
-            ray_images = ray_images.view(B * S, 3, H, W)
+            ray_images = ray_images.view(B * S, 6, H, W)
             ray_embeddings, pos = self.ray_encoder(ray_images)
 
             if "raymap" in self.intrinsics_encoder_type:
-                print(f"using raymap encoder")
+                print("using raymap encoder")
 
                 patch_tokens += ray_embeddings
-            
+
             elif "camray" in self.intrinsics_encoder_type:
-                print(f"using camray encoder")
-              
+                print("using camray encoder")
+
                 # Concatenate patch tokens with ray embeddings along the embedding dimension
                 # patch_tokens: (B*S, P, C), ray_embeddings: (B*S, P, C)
-                patch_tokens = torch.cat([patch_tokens, ray_embeddings], dim=2)  # (B*S, P, 2*C)
+                patch_tokens = torch.cat(
+                    [patch_tokens, ray_embeddings], dim=2
+                )  # (B*S, P, 2*C)
 
                 # Project concatenated embeddings back to C dimensions
-                patch_tokens = self.raymap_reprojection_layer(patch_tokens)  # (B*S, P, C)
+                patch_tokens = self.raymap_reprojection_layer(
+                    patch_tokens
+                )  # (B*S, P, C)
 
             else:
                 print("No intrinsics encoder used.")
-
 
         if poses is not None:
             poses = poses.to(next(self.parameters()).device)
 
             if self.other_ablations.decompose_pose_scale:
                 # isolate the translations from the B, S, 3, 4 pose tensor
-                translations = poses[:, :, :, 3]  # [B, S, 3] - extract translation columns
-                rotations = poses[:, :, :, :3]   # [B, S, 3, 3] - extract rotation part
-                
+                translations = poses[
+                    :, :, :, 3
+                ]  # [B, S, 3] - extract translation columns
+                rotations = poses[:, :, :, :3]  # [B, S, 3, 3] - extract rotation part
+
                 # Normalize the pose translations by the average norm of the non-zero pose translations per batch scene
-                normalized_translations, norm_factors = normalize_pose_translations(translations, return_norm_factor=True)
-                
+                normalized_translations, norm_factors = normalize_pose_translations(
+                    translations, return_norm_factor=True
+                )
+
                 # store the normalized translations as the new translations in the poses tensor
-                poses = torch.cat([rotations, normalized_translations.unsqueeze(-1)], dim=-1)  # [B, S, 3, 4]
-                
+                poses = torch.cat(
+                    [rotations, normalized_translations.unsqueeze(-1)], dim=-1
+                )  # [B, S, 3, 4]
+
                 # take the log of the normalizing scale factor, add small epsilon, then encode using pose_scale_encoder
-                log_scale_factors = torch.log(norm_factors + 1e-8)  # [B] - add epsilon for numerical stability
-                log_scale_factors = log_scale_factors.unsqueeze(-1)  # [B, 1] for encoder input
-                
+                log_scale_factors = torch.log(
+                    norm_factors + 1e-8
+                )  # [B] - add epsilon for numerical stability
+                log_scale_factors = log_scale_factors.unsqueeze(
+                    -1
+                )  # [B, 1] for encoder input
+
                 # Expand to match B*S for encoding
-                log_scale_factors_expanded = log_scale_factors.unsqueeze(1).expand(B, S, 1).reshape(B*S, 1)  # [B*S, 1]
-                
-                pose_scale_encodings = self.pose_scale_encoder(log_scale_factors_expanded)  # [B*S, embed_dim]
-                
+                log_scale_factors_expanded = (
+                    log_scale_factors.unsqueeze(1).expand(B, S, 1).reshape(B * S, 1)
+                )  # [B*S, 1]
+
+                pose_scale_encodings = self.pose_scale_encoder(
+                    log_scale_factors_expanded
+                )  # [B*S, embed_dim]
+
                 # add pose scale encodings to the camera tokens
                 if self.encode_pose_in_register:
-                    pose_scale_encodings = pose_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    pose_scale_encodings = pose_scale_encodings.view(
+                        B * S, 1, -1
+                    )  # [B*S, 1, embed_dim]
                     # Add to first register token (could be customized)
                     register_token[:, 0:1, :] += pose_scale_encodings
                 else:
-                    pose_scale_encodings = pose_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    pose_scale_encodings = pose_scale_encodings.view(
+                        B * S, 1, -1
+                    )  # [B*S, 1, embed_dim]
                     camera_token += pose_scale_encodings
-         
+
             if self.pose_encoder_type in ["6D", "quaternion", "3x4"]:
                 print(f"[DEBUG] pose_encoder_type: {self.pose_encoder_type}")
                 print(f"[DEBUG] poses is None: {poses is None}")
                 if poses is not None:
                     print(f"[DEBUG] poses shape: {poses.shape}")
-                
+
                 if self.pose_encoder_type == "6D":
                     if poses is None:
-                        print(f"[ERROR] poses is None but pose_encoder_type is 6D!")
+                        print("[ERROR] poses is None but pose_encoder_type is 6D!")
                         return None, None
-                    
-                    poses = poses.view(B * S, 3, 4) 
+
+                    poses = poses.view(B * S, 3, 4)
                     rotations = poses[:, :, :3]
                     translations = poses[:, :, 3]
                     print(f"[DEBUG] rotations shape: {rotations.shape}")
                     print(f"[DEBUG] rotations is None: {rotations is None}")
-                    
+
                     # Check rotation matrix validity
-                    print(f"[DEBUG] rotations min/max values: {rotations.min().item():.6f} / {rotations.max().item():.6f}")
-                    
+                    print(
+                        f"[DEBUG] rotations min/max values: {rotations.min().item():.6f} / {rotations.max().item():.6f}"
+                    )
+
                     # Check if rotations contain NaN or inf
                     has_nan = torch.isnan(rotations).any()
                     has_inf = torch.isinf(rotations).any()
                     print(f"[DEBUG] rotations has NaN: {has_nan}, has inf: {has_inf}")
-                    
+
                     if has_nan or has_inf:
-                        print(f"[ERROR] rotations contain NaN or inf values, cannot convert to 6D")
+                        print(
+                            "[ERROR] rotations contain NaN or inf values, cannot convert to 6D"
+                        )
                         # Use identity rotations as fallback
-                        rotations = torch.eye(3, device=rotations.device, dtype=rotations.dtype).unsqueeze(0).repeat(B * S, 1, 1)
-                        print(f"[DEBUG] Using identity rotations as fallback")
-                    
+                        rotations = (
+                            torch.eye(3, device=rotations.device, dtype=rotations.dtype)
+                            .unsqueeze(0)
+                            .repeat(B * S, 1, 1)
+                        )
+                        print("[DEBUG] Using identity rotations as fallback")
+
                     # Check determinant (should be close to 1 for rotation matrices)
                     det = torch.det(rotations)
-                    print(f"[DEBUG] rotation determinants min/max: {det.min().item():.6f} / {det.max().item():.6f}")
-                    
+                    print(
+                        f"[DEBUG] rotation determinants min/max: {det.min().item():.6f} / {det.max().item():.6f}"
+                    )
+
                     # Debug tensor properties before calling matrix_to_rotation_6d
                     print(f"[DEBUG] rotations dtype: {rotations.dtype}")
                     print(f"[DEBUG] rotations device: {rotations.device}")
                     print(f"[DEBUG] rotations requires_grad: {rotations.requires_grad}")
-                    print(f"[DEBUG] rotations is_contiguous: {rotations.is_contiguous()}")
-                    
+                    print(
+                        f"[DEBUG] rotations is_contiguous: {rotations.is_contiguous()}"
+                    )
+
                     # Ensure tensor is in the right format for pytorch3d
                     rotations = rotations.contiguous().float()
-                    print(f"[DEBUG] After contiguous() - is_contiguous: {rotations.is_contiguous()}")
-                    
+                    print(
+                        f"[DEBUG] After contiguous() - is_contiguous: {rotations.is_contiguous()}"
+                    )
+
                     try:
                         rotation_6d = matrix_to_rotation_6d(rotations)
                         poses = torch.cat([rotation_6d, translations], dim=1)
-                        print(f"[DEBUG] Successfully converted to 6D rotation")
+                        print("[DEBUG] Successfully converted to 6D rotation")
                     except Exception as e:
-                        print(f"[ERROR] matrix_to_rotation_6d failed with error: {str(e)}")
+                        print(
+                            f"[ERROR] matrix_to_rotation_6d failed with error: {str(e)}"
+                        )
                         print(f"[ERROR] Error type: {type(e).__name__}")
                         # Fallback: use manual 6D conversion
-                        rotation_6d = rotations[:, :, :2].reshape(B * S, 6)  # First 2 columns
+                        rotation_6d = rotations[:, :, :2].reshape(
+                            B * S, 6
+                        )  # First 2 columns
                         poses = torch.cat([rotation_6d, translations], dim=1)
-                        print(f"[DEBUG] Using manual 6D conversion as fallback")
+                        print("[DEBUG] Using manual 6D conversion as fallback")
 
                 elif self.pose_encoder_type == "quaternion":
-                    poses = poses.view(B * S, 3, 4) 
+                    poses = poses.view(B * S, 3, 4)
                     rotations = poses[:, :, :3]
                     translations = poses[:, :, 3]
                     quaternions = mat_to_quat(rotations)
                     poses = torch.cat([quaternions, translations], dim=1)
-                
+
                 elif self.pose_encoder_type == "3x4":
-                    poses = poses.view(B * S, -1) # Reshape to [B*S, 12] 
-                
+                    poses = poses.view(B * S, -1)  # Reshape to [B*S, 12]
+
                 pose_encodings = self.pose_encoder(poses)  # (B*S, embed_dim)
 
                 if self.encode_pose_in_register:
                     pose_encodings = pose_encodings.view(B * S, 4, -1)  # (B*S, 4, 1024)
                     register_token += pose_encodings
                 else:
-                    pose_encodings = pose_encodings.view(B * S, 1, -1)  # (B*S, 1, 1024)  
+                    pose_encodings = pose_encodings.view(B * S, 1, -1)  # (B*S, 1, 1024)
                     camera_token += pose_encodings
             # else:
             #     print(f"Pose encoder type '{self.pose_encoder_type}' not supported, skipping pose encoding.")
 
         # Handle depth input - choose between z-depth and depth-along-ray based on ablation config
         depths_to_use = None
-        
+
         # Backward compatibility: if old 'depths' parameter is used, treat as z-depth
         if depths is not None:
             depths_to_use = depths
-            print(f"[Pow3rAggregator] Using backward compatibility 'depths' parameter (treated as z-depth), shape: {depths.shape}")
+            print(
+                f"[Pow3rAggregator] Using backward compatibility 'depths' parameter (treated as z-depth), shape: {depths.shape}"
+            )
         else:
             # Use ablation config to choose between depth types
-            normalize_raymap = getattr(self.other_ablations, 'normalize_raymap', True)
+            normalize_raymap = getattr(self.other_ablations, "normalize_raymap", True)
             print(f"[Pow3rAggregator] normalize_raymap setting: {normalize_raymap}")
-            print(f"[Pow3rAggregator] depths_z available: {depths_z is not None}, depths_along_ray available: {depths_along_ray is not None}")
-            
+            print(
+                f"[Pow3rAggregator] depths_z available: {depths_z is not None}, depths_along_ray available: {depths_along_ray is not None}"
+            )
+
             if normalize_raymap and depths_along_ray is not None:
                 # Use depth along ray for normalized raymaps
                 depths_to_use = depths_along_ray
-                print(f"[Pow3rAggregator] ✓ Using depth_along_ray (normalize_raymap=True), shape: {depths_along_ray.shape}")
+                print(
+                    f"[Pow3rAggregator] ✓ Using depth_along_ray (normalize_raymap=True), shape: {depths_along_ray.shape}"
+                )
             elif not normalize_raymap and depths_z is not None:
                 # Use z-depth for non-normalized raymaps
                 depths_to_use = depths_z
-                print(f"[Pow3rAggregator] ✓ Using depth_z (normalize_raymap=False), shape: {depths_z.shape}")
+                print(
+                    f"[Pow3rAggregator] ✓ Using depth_z (normalize_raymap=False), shape: {depths_z.shape}"
+                )
             elif depths_along_ray is not None:
                 # Fallback to depth along ray if available
                 depths_to_use = depths_along_ray
-                print(f"[Pow3rAggregator] ✓ Fallback to depth_along_ray (preferred depth type unavailable), shape: {depths_along_ray.shape}")
+                print(
+                    f"[Pow3rAggregator] ✓ Fallback to depth_along_ray (preferred depth type unavailable), shape: {depths_along_ray.shape}"
+                )
             elif depths_z is not None:
                 # Fallback to z-depth if available
                 depths_to_use = depths_z
-                print(f"[Pow3rAggregator] ✓ Fallback to depth_z (preferred depth type unavailable), shape: {depths_z.shape}")
+                print(
+                    f"[Pow3rAggregator] ✓ Fallback to depth_z (preferred depth type unavailable), shape: {depths_z.shape}"
+                )
             else:
-                print(f"[Pow3rAggregator] ⚠️  No depth information available - skipping depth conditioning")
-        
+                print(
+                    "[Pow3rAggregator] ⚠️  No depth information available - skipping depth conditioning"
+                )
+
         if depths_to_use is not None:
             # Add channel dimension and reshape from (B, S, H, W) to (B*S, 1, H, W)
             depths_final = depths_to_use.unsqueeze(2)  # (B, S, 1, H, W)
-            
+
             # Apply depth scale decomposition if enabled
             if self.other_ablations.decompose_depth_scale:
                 # Normalize the depth values by the average of the non-zero depth values per batch scene
-                normalized_depths, depth_norm_factors = normalize_depth_values(depths_final, return_norm_factor=True)
-                
+                normalized_depths, depth_norm_factors = normalize_depth_values(
+                    depths_final, return_norm_factor=True
+                )
+
                 # Update depths with normalized values
                 depths_final = normalized_depths
-                
+
                 # Take the log of the normalizing scale factor, add small epsilon, then encode using depth_scale_encoder
-                log_depth_scale_factors = torch.log(depth_norm_factors + 1e-8)  # [B] - add epsilon for numerical stability
-                log_depth_scale_factors = log_depth_scale_factors.unsqueeze(-1)  # [B, 1] for encoder input
-                
+                log_depth_scale_factors = torch.log(
+                    depth_norm_factors + 1e-8
+                )  # [B] - add epsilon for numerical stability
+                log_depth_scale_factors = log_depth_scale_factors.unsqueeze(
+                    -1
+                )  # [B, 1] for encoder input
+
                 # Expand to match B*S for encoding
-                log_depth_scale_factors_expanded = log_depth_scale_factors.unsqueeze(1).expand(B, S, 1).reshape(B*S, 1)  # [B*S, 1]
-                
-                depth_scale_encodings = self.depth_scale_encoder(log_depth_scale_factors_expanded)  # [B*S, embed_dim]
-                
+                log_depth_scale_factors_expanded = (
+                    log_depth_scale_factors.unsqueeze(1)
+                    .expand(B, S, 1)
+                    .reshape(B * S, 1)
+                )  # [B*S, 1]
+
+                depth_scale_encodings = self.depth_scale_encoder(
+                    log_depth_scale_factors_expanded
+                )  # [B*S, embed_dim]
+
                 # Add depth scale encodings to the camera tokens
                 if self.encode_pose_in_register:
-                    depth_scale_encodings = depth_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    depth_scale_encodings = depth_scale_encodings.view(
+                        B * S, 1, -1
+                    )  # [B*S, 1, embed_dim]
                     # Add to second register token (could be customized)
                     register_token[:, 1:2, :] += depth_scale_encodings
                 else:
-                    depth_scale_encodings = depth_scale_encodings.view(B * S, 1, -1)  # [B*S, 1, embed_dim]
+                    depth_scale_encodings = depth_scale_encodings.view(
+                        B * S, 1, -1
+                    )  # [B*S, 1, embed_dim]
                     camera_token += depth_scale_encodings
-            
+
             depths_final = depths_final.view(B * S, 1, H, W)
-            print(f"[Pow3rAggregator] Final depth tensor for encoding - shape: {depths_final.shape}, min: {depths_final.min():.4f}, max: {depths_final.max():.4f}, mean: {depths_final.mean():.4f}")
+            print(
+                f"[Pow3rAggregator] Final depth tensor for encoding - shape: {depths_final.shape}, min: {depths_final.min():.4f}, max: {depths_final.max():.4f}, mean: {depths_final.mean():.4f}"
+            )
             # encode the depths
             depth_encodings, _ = self.depth_encoder(depths_final)
             patch_tokens += depth_encodings
-            print(f"[Pow3rAggregator] Depth encodings applied to patch tokens - encoding shape: {depth_encodings.shape}")
+            print(
+                f"[Pow3rAggregator] Depth encodings applied to patch tokens - encoding shape: {depth_encodings.shape}"
+            )
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
         special_attention_args = None
-        special_attention_type = self.pose_encoder_type if self.pose_encoder_type in self.attention_encoder_types else None
+        special_attention_type = (
+            self.pose_encoder_type
+            if self.pose_encoder_type in self.attention_encoder_types
+            else None
+        )
         if self.pose_encoder_type in self.attention_encoder_types:
             if self.pose_encoder_type == "prope" and poses is not None:
-                prope_input_intrinsics = intrinsics if "prope" in self.intrinsics_encoder_type else None
-                special_attention_args = self.setup_prope(poses, prope_input_intrinsics, H, W, tokens.shape[1], B)
+                prope_input_intrinsics = (
+                    intrinsics if "prope" in self.intrinsics_encoder_type else None
+                )
+                special_attention_args = self.setup_prope(
+                    poses, prope_input_intrinsics, H, W, tokens.shape[1], B
+                )
 
-                print("="*50)
-                print(f"Setting up Prope Attention with {prope_input_intrinsics is not None} intrinsics")
-                print("="*50)
+                print("=" * 50)
+                print(
+                    f"Setting up Prope Attention with {prope_input_intrinsics is not None} intrinsics"
+                )
+                print("=" * 50)
 
             elif "cape" in self.pose_encoder_type and poses is not None:
                 special_attention_args = self.setup_cape(poses, tokens.shape[1], B)
-                print("="*50)
+                print("=" * 50)
                 print("Setting up Cape Attention")
-                print("="*50)
+                print("=" * 50)
 
             elif "gta" in self.pose_encoder_type and poses is not None:
                 special_attention_args = self.setup_gta(poses, tokens.shape[1], B)
 
-                print("="*50)
+                print("=" * 50)
                 print("Setting up GTA Attention")
-                print("="*50)
-            
-            else:
-                print(f"special encoder type does not exist: {self.pose_encoder_type}, skipping special attention")
+                print("=" * 50)
 
+            else:
+                print(
+                    f"special encoder type does not exist: {self.pose_encoder_type}, skipping special attention"
+                )
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(
+                B * S, H // self.patch_size, W // self.patch_size, device=images.device
+            )
 
         if self.patch_start_idx > 0 and pos is not None:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
+            pos_special = (
+                torch.zeros(B * S, self.patch_start_idx, 2)
+                .to(images.device)
+                .to(pos.dtype)
+            )
             pos = torch.cat([pos_special, pos], dim=1)
 
         # update P because we added special tokens
@@ -698,72 +834,112 @@ class Pow3rAggregator(nn.Module):
         global_idx = 0
         output_list = []
 
-        for i in range(self.aa_block_num): 
-            if self.skip_connections is not None and i in self.skip_connections and i != 0:
+        for i in range(self.aa_block_num):
+            if (
+                self.skip_connections is not None
+                and i in self.skip_connections
+                and i != 0
+            ):
                 # Apply skip connections: add priors to tokens at specified layers
-                
+
                 # Token structure after concatenation: [camera_token, register_token, patch_tokens]
                 # - camera_token: [B*S, 1, C] (1 camera token per frame)
-                # - register_token: [B*S, num_register_tokens, C] 
+                # - register_token: [B*S, num_register_tokens, C]
                 # - patch_tokens: [B*S, num_patch_tokens, C]
-                
-                
+
                 # Extract different token types
-                tokens = tokens.view(B * S, -1, C)  # Reshape to [B*S, 1+num_register_tokens, num_patch_tokens, C]
-                camera_tokens = tokens[:, 0:1, :]  # [B*S, 1, C] - 1 camera token per frame
-                register_tokens = tokens[:, 1:self.patch_start_idx, :]  # [B*S, num_register_tokens, C]
-                patch_tokens = tokens[:, self.patch_start_idx:, :]  # [B*S, num_patch_tokens, C]
-      
-                
+                tokens = tokens.view(
+                    B * S, -1, C
+                )  # Reshape to [B*S, 1+num_register_tokens, num_patch_tokens, C]
+                camera_tokens = tokens[
+                    :, 0:1, :
+                ]  # [B*S, 1, C] - 1 camera token per frame
+                register_tokens = tokens[
+                    :, 1 : self.patch_start_idx, :
+                ]  # [B*S, num_register_tokens, C]
+                patch_tokens = tokens[
+                    :, self.patch_start_idx :, :
+                ]  # [B*S, num_patch_tokens, C]
+
                 if poses is not None and pose_encodings is not None:
                     if self.encode_pose_in_register:
                         register_tokens += pose_encodings
                     else:
                         camera_tokens += pose_encodings
-                
+
                 if depths is not None and depth_encodings is not None:
                     patch_tokens = patch_tokens + depth_encodings
-                    
+
                 if intrinsics is not None and ray_embeddings is not None:
                     patch_tokens = patch_tokens + ray_embeddings
-                
+
                 # Update the tokens with the modified camera and patch tokens
                 tokens[:, 0:1, :] = camera_tokens  # Update camera tokens
-                tokens[:, 1:self.patch_start_idx, :] = register_tokens
-                tokens[:, self.patch_start_idx:, :] = patch_tokens  # Update patch tokens
-                tokens = tokens.view(B*S, -1, C)  # Reshape back to [B*S, 1+num_register_tokens+num_patch_tokens, C]
-            
+                tokens[:, 1 : self.patch_start_idx, :] = register_tokens
+                tokens[:, self.patch_start_idx :, :] = (
+                    patch_tokens  # Update patch tokens
+                )
+                tokens = tokens.view(
+                    B * S, -1, C
+                )  # Reshape back to [B*S, 1+num_register_tokens+num_patch_tokens, C]
+
             use_special_attention = False
             if special_attention_args is not None:
-                
-                if self.special_attention_skip_connections == "all": # apply special attention to all layers if not specified
-                    use_special_attention = True 
+                if (
+                    self.special_attention_skip_connections == "all"
+                ):  # apply special attention to all layers if not specified
+                    use_special_attention = True
 
                 elif self.special_attention_skip_connections is not None:
                     # Only check 'i in ...' if it's actually a list/iterable, not None
-                    if isinstance(self.special_attention_skip_connections, (list, tuple)):
-                        use_special_attention = True if i in self.special_attention_skip_connections else False
+                    if isinstance(
+                        self.special_attention_skip_connections, (list, tuple)
+                    ):
+                        use_special_attention = (
+                            True
+                            if i in self.special_attention_skip_connections
+                            else False
+                        )
 
             for attn_type in self.aa_order:
-                
                 if attn_type == "frame":
-                    tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos, 
-                        special_attention_args=special_attention_args, use_special_attention=use_special_attention,
-                        special_attention_type=special_attention_type,
+                    tokens, frame_idx, frame_intermediates = (
+                        self._process_frame_attention(
+                            tokens,
+                            B,
+                            S,
+                            P,
+                            C,
+                            frame_idx,
+                            pos=pos,
+                            special_attention_args=special_attention_args,
+                            use_special_attention=use_special_attention,
+                            special_attention_type=special_attention_type,
+                        )
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos, 
-                        special_attention_args=special_attention_args, use_special_attention=use_special_attention,
-                        special_attention_type=special_attention_type,
+                    tokens, global_idx, global_intermediates = (
+                        self._process_global_attention(
+                            tokens,
+                            B,
+                            S,
+                            P,
+                            C,
+                            global_idx,
+                            pos=pos,
+                            special_attention_args=special_attention_args,
+                            use_special_attention=use_special_attention,
+                            special_attention_type=special_attention_type,
+                        )
                     )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
-                concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
+                concat_inter = torch.cat(
+                    [frame_intermediates[i], global_intermediates[i]], dim=-1
+                )
                 output_list.append(concat_inter)
 
         del concat_inter
@@ -771,11 +947,19 @@ class Pow3rAggregator(nn.Module):
         del global_intermediates
         return output_list, self.patch_start_idx
 
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, 
-                                special_attention_args=None, 
-                                use_special_attention=False, 
-                                special_attention_type=None
-                                ):
+    def _process_frame_attention(
+        self,
+        tokens,
+        B,
+        S,
+        P,
+        C,
+        frame_idx,
+        pos=None,
+        special_attention_args=None,
+        use_special_attention=False,
+        special_attention_type=None,
+    ):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
         """
@@ -798,7 +982,7 @@ class Pow3rAggregator(nn.Module):
                     special_attention_args=special_attention_args,
                     use_reentrant=self.use_reentrant,
                     use_special_attention=use_special_attention,
-                    special_attention_type=special_attention_type
+                    special_attention_type=special_attention_type,
                 )
             else:
                 tokens = self.frame_blocks[frame_idx](
@@ -806,18 +990,26 @@ class Pow3rAggregator(nn.Module):
                     pos=pos,
                     special_attention_args=special_attention_args,
                     use_special_attention=use_special_attention,
-                    special_attention_type=special_attention_type
+                    special_attention_type=special_attention_type,
                 )
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
         return tokens, frame_idx, intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, 
-                                    special_attention_args=None, 
-                                    use_special_attention=False,
-                                    special_attention_type=None
-                                    ):
+    def _process_global_attention(
+        self,
+        tokens,
+        B,
+        S,
+        P,
+        C,
+        global_idx,
+        pos=None,
+        special_attention_args=None,
+        use_special_attention=False,
+        special_attention_type=None,
+    ):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
         """
@@ -839,7 +1031,7 @@ class Pow3rAggregator(nn.Module):
                     special_attention_args=special_attention_args,
                     use_reentrant=self.use_reentrant,
                     use_special_attention=use_special_attention,
-                    special_attention_type=special_attention_type
+                    special_attention_type=special_attention_type,
                 )
             else:
                 tokens = self.global_blocks[global_idx](
@@ -847,7 +1039,7 @@ class Pow3rAggregator(nn.Module):
                     pos=pos,
                     special_attention_args=special_attention_args,
                     use_special_attention=use_special_attention,
-                    special_attention_type=special_attention_type
+                    special_attention_type=special_attention_type,
                 )
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
