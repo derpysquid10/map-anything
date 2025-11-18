@@ -1642,7 +1642,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         info_sharing_input = MultiViewTransformerInput(
             features=all_encoder_features_across_views,
             additional_input_tokens=input_scale_token,
-            additional_priors=attention_geometric_priors,
+            # additional_priors=attention_geometric_priors,
         )
         if self.info_sharing_return_type == "no_intermediate_features":
             final_info_sharing_multi_view_feat = self.info_sharing(info_sharing_input)

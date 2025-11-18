@@ -12,6 +12,7 @@ from mapanything.models.external.pow3r_vggt.models.pow3r_aggregator import Pow3r
 from mapanything.models.external.pow3r_vggt.heads.camera_head import CameraHead
 from mapanything.models.external.pow3r_vggt.heads.dpt_head import DPTHead
 from mapanything.models.external.pow3r_vggt.heads.track_head import TrackHead
+from mapanything.models.external.pow3r_vggt.heads.scale_head import *
 
 class default_ablation():
     def __init__(self):
@@ -26,13 +27,12 @@ class default_ablation():
 
         self.encode_pose_in_register = True
 
-        
-
 
 class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
-                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, ablation=default_ablation()):
+                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, enable_scale=True, scale_head_type="ScaleHead_MLP_LCP", ablation=default_ablation()):
         super().__init__()
+        self.scale_head_type = scale_head_type
 
         self.aggregator = Pow3rAggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim, ablation=ablation)
 
@@ -41,7 +41,14 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
 
-        print(f"using heads cam: {enable_camera}, point: {enable_point} tack: {enable_track} depth: {enable_depth}")
+        cls_name = f"{scale_head_type}"
+        cls = globals().get(cls_name)
+        if cls is None:
+            raise ValueError(f"Unknown scale head type: {cls_name}")
+
+        self.scale_head = cls(dim_in=2 * embed_dim) if enable_scale else None
+
+        print(f"using heads cam: {enable_camera}, point: {enable_point} tack: {enable_track} depth: {enable_depth} scale: {enable_scale}")
         
         print("^"*100)
         print(f"skip connections: {ablation.skip_connections}")
@@ -53,6 +60,10 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
         intrinsics = None,
         poses = None,
         depths = None,
+        scale = None,
+        injection_masks = None,
+        gt_areas = None,
+        data_iter = None,
     ):
         """
         Forward pass of the VGGT model.
@@ -81,11 +92,13 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
         # If without batch dimension, add it
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
-            
+
+        B, S, C, H, W = images.shape
+
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        aggregated_tokens_list, patch_start_idx = self.aggregator(images=images, intrinsics=intrinsics, poses=poses, depths=depths)
+        aggregated_tokens_list, patch_start_idx, cls_token, patch_tokens, pose_encodings, ray_embeddings = self.aggregator(images=images, intrinsics=intrinsics, poses=poses, depths=depths, scale=scale, injection_masks=injection_masks)
 
         predictions = {}
 
@@ -109,6 +122,16 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
 
+            ## Normal Head
+            if "MoE" not in self.scale_head_type and self.scale_head_type!= "none":
+                scale = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, B, S) # gt_scale, areas, B, S)  # for scale head ##poses
+            else:
+                ## MoE
+                scale, cls_pred = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, gt_areas, data_iter, B, S) #, phase) # gt_scale, areas, B, S)  # for scale head ##poses
+                predictions["cls_pred"] = cls_pred  # gating network output for MoE
+
+            predictions["scale"] = scale
+
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(
                 aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
@@ -121,4 +144,3 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
             predictions["images"] = images  # store the images for visualization during inference
 
         return predictions
-

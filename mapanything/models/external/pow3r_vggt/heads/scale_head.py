@@ -537,10 +537,10 @@ class ScaleHead_MLP_LCP(nn.Module):
         self.token_norm2048 = nn.LayerNorm(dim_in)
         self.token_norm5120 = nn.LayerNorm(int(2.5*dim_in))
 
-        self.mlp = MLP([5120, 1024, 256, 64, 1])
+        self.mlp = MLP([5120, 2048, 256, 64, 1])
         self.proj = nn.Linear(dim_in, 1)  # Will learn attention over tokens
 
-    def forward(self, aggregated_tokens_list: list, cls_token: torch.tensor, patch_tokens: torch.tensor, B: int, S: int) -> float:
+    def forward(self, aggregated_tokens_list: list, cls_token: torch.tensor, patch_tokens: torch.tensor, pose_encodings: torch.tensor, ray_embeddings: torch.tensor, B: int, S: int) -> float:
         aggregated_cam_token = aggregated_tokens_list[-1][:,:,0,:]                             # [B,S,2048]
         # aggregated_register_token = aggregated_tokens_list[-1][:,:,1:5,:]                      # [B,S,4,2048]
         aggregated_patch_tokens = aggregated_tokens_list[-1][:,:,5:,:]                         # [B,S,N,2048]
