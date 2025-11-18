@@ -9,8 +9,8 @@ export HYDRA_FULL_ERROR=1
 
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    # "10 2 benchmark_518_eth3d_snpp_tav2"
-    # "10 4 benchmark_518_eth3d_snpp_tav2"
+    "10 2 benchmark_518_eth3d_snpp_tav2"
+    "10 4 benchmark_518_eth3d_snpp_tav2"
     "10 8 benchmark_518_eth3d_snpp_tav2"
     # "5 16 benchmark_518_eth3d_snpp_tav2"
     # "4 24 benchmark_518_eth3d_snpp_tav2"
@@ -36,9 +36,9 @@ for combo in "${batch_sizes_and_views[@]}"; do
         model=pow3r_vggt \
         amp=0 \
         model.model_config.load_custom_ckpt=true \
-        model.model_config.custom_ckpt_path="/mnt/nfs/binbin/gtan_weights/multi_origin_no_depth/checkpoint_0.pt" \
+        model.model_config.custom_ckpt_path="/mnt/nfs/binbin/gtan_weights/scannet_multi_lr_encoders/checkpoint_0.pt" \
         +model/task=non_metric_poses_non_metric_depth_sparse \
-        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/multi_origin_no_depth'
+        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/scannet_multi_lr_encoders'
 
     echo "Finished running $dataset with batch_size=$batch_size and num_views=$num_views"
 done

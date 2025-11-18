@@ -9,14 +9,14 @@ export HYDRA_FULL_ERROR=1
 
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    # "10 2 benchmark_518_eth3d_snpp_tav2"
-    # "10 4 benchmark_518_eth3d_snpp_tav2"
-    # "10 8 benchmark_518_eth3d_snpp_tav2"
-    "5 16 benchmark_518_eth3d_snpp_tav2"
-    "4 24 benchmark_518_eth3d_snpp_tav2"
-    "2 32 benchmark_518_eth3d_snpp_tav2"
-    "1 50 benchmark_518_eth3d_snpp_tav2"
-    "1 100 benchmark_518_eth3d_snpp_tav2"
+    "10 2 benchmark_518_eth3d_snpp_tav2"
+    "10 4 benchmark_518_eth3d_snpp_tav2"
+    "10 8 benchmark_518_eth3d_snpp_tav2"
+    # "5 16 benchmark_518_eth3d_snpp_tav2"
+    # "4 24 benchmark_518_eth3d_snpp_tav2"
+    # "2 32 benchmark_518_eth3d_snpp_tav2"
+    # "1 50 benchmark_518_eth3d_snpp_tav2"
+    # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 # Loop through each combination
@@ -33,8 +33,10 @@ for combo in "${batch_sizes_and_views[@]}"; do
         dataset.num_workers=12 \
         dataset.num_views=$num_views \
         batch_size=$batch_size \
-        model=pi3 \
-        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/pi3'
+        model=pow3r_vggt \
+        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/uniscale_best_both'\
+        model.model_config.load_custom_ckpt=true \
+        model.model_config.custom_ckpt_path="/mnt/nfs/SpatialAI/moma/logs/final_pose_cam_both0.5probs/checkpoint_0_38000.pt" \
 
     echo "Finished running $dataset with batch_size=$batch_size and num_views=$num_views"
 done
