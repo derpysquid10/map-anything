@@ -574,6 +574,8 @@ def benchmark(args):
                 "z_depth_inlier_thres_103": [],
                 "aligned_z_depth_abs_rel": [],
                 "aligned_z_depth_inlier_thres_103": [],
+                "aligned_pointmaps_mae": [],
+                "aligned_pointmaps_inlier_thres_103": [],
                 "ray_dirs_err_deg": [],
             }
 
@@ -627,6 +629,9 @@ def benchmark(args):
                 z_depth_inlier_thres_103_across_views = []
                 aligned_z_depth_abs_rel_across_views = []
                 aligned_z_depth_inlier_thres_103_across_views = []
+                aligned_pointmaps_mae_across_views = []
+                aligned_pointmaps_inlier_thres_103_across_views = []
+                scale_factors_across_views = []
                 ray_dirs_err_deg_across_views = []
 
                 gt_poses_curr_set = []
@@ -730,6 +735,25 @@ def benchmark(args):
                         thresh=1.03,
                     )
 
+                    # scale the pointclouds by the scale factor found from median alignment above. Then run the mae error for pointclouds and thresh inliers
+                    
+                    # Scale the predicted pointcloud by the alignment scale factor
+                    pred_pts3d_curr_view = pr_info["pts3d"][view_idx][batch_idx].numpy()
+                    aligned_pred_pts3d_curr_view = pred_pts3d_curr_view * scale_factor
+                    
+                    # Calculate aligned pointcloud metrics
+                    aligned_pointmaps_mae_curr_view = m_rel_ae(
+                        gt=gt_info["pts3d"][view_idx][batch_idx].numpy(),
+                        pred=aligned_pred_pts3d_curr_view,
+                        mask=valid_mask_curr_view,
+                    )
+                    aligned_pointmaps_inlier_thres_103_curr_view = thresh_inliers(
+                        gt=gt_info["pts3d"][view_idx][batch_idx].numpy(),
+                        pred=aligned_pred_pts3d_curr_view,
+                        mask=valid_mask_curr_view,
+                        thresh=1.03,
+                    )
+
                     # Save ground truth and aligned predicted depth images as JPG
                     gt_depth_filename = os.path.join(
                         depths_viz_dir,
@@ -783,6 +807,13 @@ def benchmark(args):
                     aligned_z_depth_inlier_thres_103_across_views.append(
                         aligned_z_depth_inlier_thres_103_curr_view
                     )
+                    aligned_pointmaps_mae_across_views.append(
+                        aligned_pointmaps_mae_curr_view
+                    )
+                    aligned_pointmaps_inlier_thres_103_across_views.append(
+                        aligned_pointmaps_inlier_thres_103_curr_view
+                    )
+                    scale_factors_across_views.append(scale_factor)
 
                     # Compute the l2 norm of the ray directions and convert it to angular error in degrees
                     ray_dirs_l2 = torch.norm(
@@ -816,6 +847,12 @@ def benchmark(args):
                 )
                 aligned_z_depth_inlier_thres_103_curr_set = np.mean(
                     aligned_z_depth_inlier_thres_103_across_views
+                )
+                aligned_pointmaps_mae_curr_set = np.mean(
+                    aligned_pointmaps_mae_across_views
+                )
+                aligned_pointmaps_inlier_thres_103_curr_set = np.mean(
+                    aligned_pointmaps_inlier_thres_103_across_views
                 )
                 ray_dirs_err_deg_curr_set = np.mean(ray_dirs_err_deg_across_views)
 
@@ -875,6 +912,12 @@ def benchmark(args):
                 )
                 per_scene_results[scene]["aligned_z_depth_inlier_thres_103"].append(
                     aligned_z_depth_inlier_thres_103_curr_set.item()
+                )
+                per_scene_results[scene]["aligned_pointmaps_mae"].append(
+                    aligned_pointmaps_mae_curr_set.item()
+                )
+                per_scene_results[scene]["aligned_pointmaps_inlier_thres_103"].append(
+                    aligned_pointmaps_inlier_thres_103_curr_set.item()
                 )
                 per_scene_results[scene]["ray_dirs_err_deg"].append(
                     ray_dirs_err_deg_curr_set.item()

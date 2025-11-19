@@ -27,6 +27,7 @@ from mapanything.models.external.pow3r_vggt.utils.rotation import (
     mat_to_quat,
     quat_to_mat,
 )
+from mapanything.models.external.pow3r_vggt.heads.scale_head import *
 from mapanything.utils.geometry import (
     convert_ray_dirs_depth_along_ray_pose_trans_quats_to_pointmap,
     convert_z_depth_to_depth_along_ray,
@@ -110,10 +111,23 @@ def scale_depths_and_poses(
         cam_points (torch.Tensor, optional): Camera points (unused but kept for compatibility)
 
     Returns:
-        tuple: (scaled_depths_z, scaled_poses, scaled_depths_along_ray, world_points)
+        tuple: (scaled_depths_z, scaled_poses, scaled_depths_along_ray, world_points, B_scales)
     """
     if depths_z is None or poses is None or intrinsics is None:
-        return depths_z, poses, depths_along_ray, None
+        return depths_z, poses, depths_along_ray, None, None
+
+    # Ensure all inputs are on the same device (prefer CUDA if available)
+    device = poses.device if poses.device.type == 'cuda' else (
+        depths_z.device if depths_z.device.type == 'cuda' else 
+        intrinsics.device if intrinsics.device.type == 'cuda' else
+        poses.device
+    )
+    
+    depths_z = depths_z.to(device)
+    poses = poses.to(device) 
+    intrinsics = intrinsics.to(device)
+    if depths_along_ray is not None:
+        depths_along_ray = depths_along_ray.to(device)
 
     B, V, H, W = depths_z.shape
 
@@ -132,6 +146,9 @@ def scale_depths_and_poses(
         pts3d_cam, _ = depthmap_to_camera_frame(
             view_depth, view_intrinsic
         )  # (B, H, W, 3)
+        
+        # Ensure pts3d_cam is on the same device and dtype as poses
+        pts3d_cam = pts3d_cam.to(device=device, dtype=view_pose.dtype)
 
         # Convert pose to 4x4 matrix for transformation
         pose_4x4 = torch.zeros(B, 4, 4, device=view_pose.device, dtype=view_pose.dtype)
@@ -164,6 +181,7 @@ def scale_depths_and_poses(
 
     # Calculate distance from origin for each point
     dist = new_world_points.norm(dim=-1)  # (B, V, H, W)
+    
     dist_sum = (dist * point_masks.float()).sum(dim=[1, 2, 3])  # (B,)
     valid_count = point_masks.sum(dim=[1, 2, 3]).float()  # (B,)
     avg_scale = (dist_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)  # (B,)
@@ -183,7 +201,7 @@ def scale_depths_and_poses(
     if depths_along_ray is not None:
         scaled_depths_along_ray = depths_along_ray / avg_scale.view(-1, 1, 1, 1)
 
-    return new_depths, scaled_poses, scaled_depths_along_ray, new_world_points
+    return new_depths, scaled_poses, scaled_depths_along_ray, new_world_points, avg_scale
 
 
 class ModelArgs:
@@ -213,6 +231,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         intermediate_layer_idx=[4, 11, 17, 23],
         load_custom_ckpt=False,
         custom_ckpt_path=None,
+        enable_scale=True,
+        scale_head_type="ScaleHead_MLP_LCP",
     ):
         super().__init__()
         self.name = name
@@ -245,7 +265,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             with open(yaml_file, "r") as f:
                 print(f"opening config file at path: {yaml_file}")
                 model_config = OmegaConf.load(f)
-            self.model = Pow3rVGGT(ablation=model_config.model.ablation)
+            self.model = Pow3rVGGT(ablation=model_config.model.ablation, enable_scale=enable_scale, scale_head_type=scale_head_type)
 
             custom_ckpt = torch.load(self.custom_ckpt_path, weights_only=False)
             # Handle different checkpoint formats
@@ -265,7 +285,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
         else:
             args = ModelArgs()
-            self.model = Pow3rVGGT(ablation=args)
+            self.model = Pow3rVGGT(ablation=args, enable_scale=enable_scale, scale_head_type=scale_head_type)
             self.default_path = "/work/weights/vggt/model.pt"
             custom_ckpt = torch.load(self.default_path, weights_only=False)
 
@@ -459,7 +479,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         # Save poses to txt files
         if poses is not None:
             for view_idx in range(num_views):
-                pose_np = poses[0, view_idx].cpu().numpy()  # Take first batch
+                pose_np = poses[0, view_idx].float().cpu().numpy()  # Convert to float32 then numpy
                 np.savetxt(save_dir / f"pose_view_{view_idx}.txt", pose_np, fmt="%.6f")
 
         # Save images
@@ -475,7 +495,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             # Save as image
             Image.fromarray(img_np).save(save_dir / f"image_view_{view_idx}.jpg")
 
-        depths_z, poses, depths_along_ray, world_points = scale_depths_and_poses(
+        depths_z, poses, depths_along_ray, world_points, B_scales = scale_depths_and_poses(
             depths_z, poses, intrinsics, depths_along_ray
         )
         if world_points is not None:
@@ -485,33 +505,72 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
         # import pdb
         # pdb.set_trace()
+        # if depths_z is not None:
+        #     # Expand (B, S, H, W) to (B, S, H, W, 1) for log normalization
+        #     depths_z = depths_z.unsqueeze(-1)  # (B, S, H, W, 1)
+        #     # Apply log normalization: norm -> normalize -> scale by log(1+norm)
+        #     org_d = depths_z.norm(dim=-1, keepdim=True)  # (B, S, H, W, 1)
+        #     depths_z = depths_z / org_d.clip(min=1e-8)  # normalize
+        #     depths_z = depths_z * torch.log1p(org_d)  # scale by log(1+norm)
+        #     # Squeeze back to (B, S, H, W)
+        #     depths_z = depths_z.squeeze(-1)  # (B, S, H, W)
+            
+        # if depths_along_ray is not None:
+        #     # Expand (B, S, H, W) to (B, S, H, W, 1) for log normalization
+        #     depths_along_ray = depths_along_ray.unsqueeze(-1)  # (B, S, H, W, 1)
+        #     # Apply log normalization: norm -> normalize -> scale by log(1+norm)
+        #     org_d = depths_along_ray.norm(dim=-1, keepdim=True)  # (B, S, H, W, 1)
+        #     depths_along_ray = depths_along_ray / org_d.clip(min=1e-8)  # normalize
+        #     depths_along_ray = depths_along_ray * torch.log1p(org_d)  # scale by log(1+norm)
+        #     # Squeeze back to (B, S, H, W)
+        #     depths_along_ray = depths_along_ray.squeeze(-1)  # (B, S, H, W)
 
-        # Run the Pow3r-VGGT aggregator with conditioning
+
+        # Convert input format to what the model expects
+        model_intrinsics = None
+        model_poses = None
+        model_depths = None
+        
+        if intrinsics is not None:
+            model_intrinsics = intrinsics.to(images.device)
+            
+        if poses is not None:
+            model_poses = poses.to(images.device)
+            
+        if depths_z is not None:
+            model_depths = depths_z.to(images.device)
+
+        # Run the Pow3r-VGGT model with new interface
         with torch.autocast("cuda", dtype=self.dtype):
-            aggregated_tokens_list, ps_idx = self.model.aggregator(
+            model_output = self.model(
                 images=images,
-                intrinsics=intrinsics,
-                poses=poses,
-                depths_z=depths_z,
-                depths_along_ray=depths_along_ray,
+                intrinsics=model_intrinsics,
+                poses=model_poses,
+                depths=None,
+                # scale=1.0 / B_scales if B_scales is not None else None,
+                scale=None,
+                injection_masks=None,
             )
 
-        # Run the Camera + Pose Branch and Depth Branch
+        # Extract predictions from model output
         with torch.autocast("cuda", enabled=False):
-            # Predict Cameras
-            pose_enc = self.model.camera_head(aggregated_tokens_list)[-1]
-            # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
-            # Extrinsics Shape: (B, V, 3, 4)
-            # Intrinsics Shape: (B, V, 3, 3)
+            # Get outputs from model
+            pose_enc = model_output["pose_enc"]
+            depth_map = model_output["depth"]  # (B, V, H, W, 1)
+            depth_conf = model_output["depth_conf"]  # (B, V, H, W)
+            scale = model_output["scale"]  # Scale predictions
+            print(f"[DEBUG] Original scale shape: {scale.shape}")
+            scale = scale.view(-1, 1, 1, 1, 1)
+            print(f"[DEBUG] Reshaped scale shape: {scale.shape}")
+
+     
+    
+            # Multiply depth map by scale
+            depth_map = depth_map * scale  # (B, V, H, W, 1)    
+
+            # Extrinsic and intrinsic matrices from pose encoding
             extrinsic, intrinsic = pose_encoding_to_extri_intri(
                 pose_enc, images.shape[-2:]
-            )
-
-            # Predict Depth Maps
-            # Depth Shape: (B, V, H, W, 1)
-            # Depth Confidence Shape: (B, V, H, W)
-            depth_map, depth_conf = self.model.depth_head(
-                aggregated_tokens_list, images, ps_idx
             )
 
             # Convert the output to MapAnything format
@@ -533,7 +592,10 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 )
 
                 # Convert the extrinsics to quaternions and translations
-                curr_view_cam_translations = curr_view_extrinsic[..., :3, 3]
+                translation = curr_view_extrinsic[..., :3, 3]
+                scale_for_view = scale[:, view_idx, 0, 0, 0] if scale.shape[1] > view_idx else scale[:, 0, 0, 0, 0]
+                print(f"[DEBUG] Translation shape: {translation.shape}, Scale for view {view_idx} shape: {scale_for_view.shape}")
+                curr_view_cam_translations = translation * scale_for_view.unsqueeze(-1)
                 curr_view_cam_quats = mat_to_quat(curr_view_extrinsic[..., :3, :3])
 
                 # Convert the z depth to depth along ray
@@ -571,3 +633,23 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 )
 
         return res
+
+
+def build_intrinsics_from_pose_enc(
+    pose_encoding, image_size_hw=None,
+):
+    """Convert a pose encoding back to camera intrinsics from field of view."""
+    fov_h = pose_encoding[..., 7]
+    fov_w = pose_encoding[..., 8]
+
+    H, W = image_size_hw
+    fy = (H / 2.0) / torch.tan(fov_h / 2.0)
+    fx = (W / 2.0) / torch.tan(fov_w / 2.0)
+    intrinsics = torch.zeros(pose_encoding.shape[:2] + (3, 3), dtype=pose_encoding.dtype, device=pose_encoding.device)
+    intrinsics[..., 0, 0] = fx
+    intrinsics[..., 1, 1] = fy
+    intrinsics[..., 0, 2] = W / 2
+    intrinsics[..., 1, 2] = H / 2
+    intrinsics[..., 2, 2] = 1.0
+  
+    return intrinsics
