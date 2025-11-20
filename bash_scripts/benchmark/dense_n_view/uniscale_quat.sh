@@ -54,9 +54,9 @@ batch_sizes_and_views=(
 )
 
 prior_combinations=(
-    # "[]"
+    "[]"
     "[intrinsics]"
-    # "[extrinsics]"
+    "[extrinsics]"
     "[intrinsics,extrinsics]"
 )
 
@@ -86,7 +86,7 @@ run_benchmark_job() {
     
     echo "Starting job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
     
-    /workspace/run_benchmark_with_conda.sh $gpu \
+    CUDA_VISIBLE_DEVICES=$gpu python3 \
         benchmarking/dense_n_view/benchmark.py \
         machine=default \
         dataset=$dataset \
@@ -95,10 +95,9 @@ run_benchmark_job() {
         batch_size=$batch_size \
         model=pow3r_vggt \
         model.model_config.load_custom_ckpt=true \
-        model.model_config.custom_ckpt_path="/mnt/nfs/SpatialAI/moma/logs/final_pose_cam_both0.5probs/checkpoint_0_38000.pt" \
-        hydra.run.dir='/mnt/nfs/mapanything/benchmarking/dense_'"${num_views}"'_view/uniscale38k_inv_center_intri'"${prior_dir_name}" \
-        input_priors=$prior_combo \
-        dataset.principal_point_centered=true
+        model.model_config.custom_ckpt_path="/mnt/nfs/binbin/gtan_weights/ablation_quaternion/checkpoint_0_38000.pt" \
+        hydra.run.dir='/mnt/nfs/mapanything/benchmarking/dense_'"${num_views}"'_view/uniscalequat_'"${prior_dir_name}" \
+        input_priors=$prior_combo
     
     echo "Finished job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
 }
@@ -157,7 +156,7 @@ for job in "${all_jobs[@]}"; do
     
     # Start the job in background
     run_benchmark_job "$gpu" "$batch_size" "$num_views" "$dataset" "$prior_combo" "$prior_dir_name" &
-    job_pid=$!
+    local job_pid=$!
     
     # Track the job
     job_pids+=($job_pid)

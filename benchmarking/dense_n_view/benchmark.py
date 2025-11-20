@@ -537,8 +537,13 @@ def benchmark(args):
     }
 
     # Load Model
+    # Add input_priors to model config if specified
+    model_config = args.model.model_config.copy()
+    if hasattr(args, 'input_priors'):
+        model_config.input_priors = args.input_priors
+    
     model = init_model(
-        args.model.model_str, args.model.model_config, torch_hub_force_reload=False
+        args.model.model_str, model_config, torch_hub_force_reload=False
     )
     model.to(device)  # Move model to device
 
@@ -607,6 +612,7 @@ def benchmark(args):
 
             # Run model inference
             # Length of preds is equal to the number of views
+            
             with torch.autocast("cuda", enabled=bool(args.amp), dtype=amp_dtype):
                 preds = model(batch)
 
@@ -646,45 +652,47 @@ def benchmark(args):
                         mask=valid_mask_curr_view,
                     )
 
-                    # save gt info and pred info pts3d overlapping ply files.
-                    # to /home/binbin/gtan/map-anything/benchmarking/pc_sanity
-                    pc_sanity_dir = (
-                        "/home/binbin/gtan/map-anything/benchmarking/pc_sanity_vggt"
-                    )
-                    os.makedirs(pc_sanity_dir, exist_ok=True)
+                    # Debug file I/O removed for performance - check SAVE_DEBUG_FILES env var
+                    if os.environ.get("SAVE_DEBUG_FILES", "false").lower() == "true":
+                        # save gt info and pred info pts3d overlapping ply files.
+                        # to /home/binbin/gtan/map-anything/benchmarking/pc_sanity
+                        pc_sanity_dir = (
+                            "/home/binbin/gtan/map-anything/benchmarking/pc_sanity_vggt"
+                        )
+                        os.makedirs(pc_sanity_dir, exist_ok=True)
 
-                    # Create directory for depth visualization
-                    depths_viz_dir = (
-                        "/home/binbin/gtan/map-anything/benchmarking/depths_viz"
-                    )
-                    os.makedirs(depths_viz_dir, exist_ok=True)
+                        # Create directory for depth visualization
+                        depths_viz_dir = (
+                            "/home/binbin/gtan/map-anything/benchmarking/depths_viz"
+                        )
+                        os.makedirs(depths_viz_dir, exist_ok=True)
 
-                    # Get valid points for both GT and predicted
-                    gt_pts_valid = gt_info["pts3d"][view_idx][batch_idx].numpy()[
-                        valid_mask_curr_view
-                    ]
-                    pred_pts_valid = pr_info["pts3d"][view_idx][batch_idx].numpy()[
-                        valid_mask_curr_view
-                    ]
+                        # Get valid points for both GT and predicted
+                        gt_pts_valid = gt_info["pts3d"][view_idx][batch_idx].numpy()[
+                            valid_mask_curr_view
+                        ]
+                        pred_pts_valid = pr_info["pts3d"][view_idx][batch_idx].numpy()[
+                            valid_mask_curr_view
+                        ]
 
-                    # Save GT + Original Predicted pointcloud (GT in green, pred in red)
-                    gt_colors = np.full(
-                        (len(gt_pts_valid), 3), [0, 255, 0], dtype=np.uint8
-                    )  # Green
-                    pred_colors = np.full(
-                        (len(pred_pts_valid), 3), [255, 0, 0], dtype=np.uint8
-                    )  # Red
-                    gt_pred_original_pts = np.vstack([gt_pts_valid, pred_pts_valid])
-                    gt_pred_original_colors = np.vstack([gt_colors, pred_colors])
-                    gt_pred_original_filename = os.path.join(
-                        pc_sanity_dir,
-                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_pred_original.ply",
-                    )
-                    save_pointcloud_ply(
-                        gt_pred_original_pts,
-                        gt_pred_original_filename,
-                        gt_pred_original_colors,
-                    )
+                        # Save GT + Original Predicted pointcloud (GT in green, pred in red)
+                        gt_colors = np.full(
+                            (len(gt_pts_valid), 3), [0, 255, 0], dtype=np.uint8
+                        )  # Green
+                        pred_colors = np.full(
+                            (len(pred_pts_valid), 3), [255, 0, 0], dtype=np.uint8
+                        )  # Red
+                        gt_pred_original_pts = np.vstack([gt_pts_valid, pred_pts_valid])
+                        gt_pred_original_colors = np.vstack([gt_colors, pred_colors])
+                        gt_pred_original_filename = os.path.join(
+                            pc_sanity_dir,
+                            f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_pred_original.ply",
+                        )
+                        save_pointcloud_ply(
+                            gt_pred_original_pts,
+                            gt_pred_original_filename,
+                            gt_pred_original_colors,
+                        )
 
                     pointmaps_inlier_thres_103_curr_view = thresh_inliers(
                         gt=gt_info["pts3d"][view_idx][batch_idx].numpy(),
@@ -754,44 +762,46 @@ def benchmark(args):
                         thresh=1.03,
                     )
 
-                    # Save ground truth and aligned predicted depth images as JPG
-                    gt_depth_filename = os.path.join(
-                        depths_viz_dir,
-                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_depth.jpg",
-                    )
-                    aligned_pred_depth_filename = os.path.join(
-                        depths_viz_dir,
-                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_aligned_pred_depth.jpg",
-                    )
+                    # Depth image saving also protected by SAVE_DEBUG_FILES
+                    if os.environ.get("SAVE_DEBUG_FILES", "false").lower() == "true":
+                        # Save ground truth and aligned predicted depth images as JPG
+                        gt_depth_filename = os.path.join(
+                            depths_viz_dir,
+                            f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_gt_depth.jpg",
+                        )
+                        aligned_pred_depth_filename = os.path.join(
+                            depths_viz_dir,
+                            f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_aligned_pred_depth.jpg",
+                        )
 
-                    save_depth_image_jpg(
-                        gt_z_depth_curr_view,
-                        gt_depth_filename,
-                        mask=valid_mask_curr_view,
-                    )
-                    save_depth_image_jpg(
-                        aligned_pred_z_depth_curr_view,
-                        aligned_pred_depth_filename,
-                        mask=valid_mask_curr_view,
-                    )
+                        save_depth_image_jpg(
+                            gt_z_depth_curr_view,
+                            gt_depth_filename,
+                            mask=valid_mask_curr_view,
+                        )
+                        save_depth_image_jpg(
+                            aligned_pred_z_depth_curr_view,
+                            aligned_pred_depth_filename,
+                            mask=valid_mask_curr_view,
+                        )
 
-                    # Save the absolute relative error depth map using viridis colormap
-                    # Handle division by zero by masking out zero/invalid ground truth values
-                    gt_nonzero_mask = (gt_z_depth_curr_view > 0) & np.isfinite(gt_z_depth_curr_view)
-                    absrel_depth_map = np.zeros_like(gt_z_depth_curr_view)
-                    absrel_depth_map[gt_nonzero_mask] = (
-                        np.abs(aligned_pred_z_depth_curr_view[gt_nonzero_mask] - gt_z_depth_curr_view[gt_nonzero_mask])
-                        / gt_z_depth_curr_view[gt_nonzero_mask]
-                    )
-                    absrel_depth_filename = os.path.join(
-                        depths_viz_dir,
-                        f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_absrel_depth.jpg",
-                    )
-                    save_depth_image_jpg(
-                        absrel_depth_map,
-                        absrel_depth_filename,
-                        mask=valid_mask_curr_view,
-                    )
+                        # Save the absolute relative error depth map using viridis colormap
+                        # Handle division by zero by masking out zero/invalid ground truth values
+                        gt_nonzero_mask = (gt_z_depth_curr_view > 0) & np.isfinite(gt_z_depth_curr_view)
+                        absrel_depth_map = np.zeros_like(gt_z_depth_curr_view)
+                        absrel_depth_map[gt_nonzero_mask] = (
+                            np.abs(aligned_pred_z_depth_curr_view[gt_nonzero_mask] - gt_z_depth_curr_view[gt_nonzero_mask])
+                            / gt_z_depth_curr_view[gt_nonzero_mask]
+                        )
+                        absrel_depth_filename = os.path.join(
+                            depths_viz_dir,
+                            f"scene_{scene}_batch_{batch_idx}_view_{view_idx}_absrel_depth.jpg",
+                        )
+                        save_depth_image_jpg(
+                            absrel_depth_map,
+                            absrel_depth_filename,
+                            mask=valid_mask_curr_view,
+                        )
 
                     pointmaps_abs_rel_across_views.append(pointmaps_abs_rel_curr_view)
                     pointmaps_inlier_thres_103_across_views.append(

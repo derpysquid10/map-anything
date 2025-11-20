@@ -91,7 +91,7 @@ class RMVD_MAPA_Wrapper(torch.nn.Module):
         # construct sample dict that contains all inputs in the model-specific format: sample = {..}
 
         assert len(images) >= 1, "At least one image is required"
-        device = "cuda"
+        device = next(self.model.parameters()).device
 
         img_mean = IMAGE_NORMALIZATION_DICT[self.data_norm_type].mean.to(device)
         img_std = IMAGE_NORMALIZATION_DICT[self.data_norm_type].std.to(device)
