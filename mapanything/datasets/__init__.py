@@ -57,6 +57,8 @@ def get_test_data_loader(
         num_workers=num_workers,
         pin_memory=pin_mem,
         drop_last=drop_last,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     return data_loader
@@ -91,6 +93,8 @@ def get_test_many_ar_data_loader(
         num_workers=num_workers,
         pin_memory=pin_mem,
         drop_last=drop_last,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     return data_loader

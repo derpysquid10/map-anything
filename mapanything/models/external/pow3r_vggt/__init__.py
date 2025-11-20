@@ -16,6 +16,7 @@ import torch
 from omegaconf import OmegaConf
 from PIL import Image
 
+from mapanything.models.external.pow3r_vggt.heads.scale_head import *
 from mapanything.models.external.pow3r_vggt.models.pow3r_vggt import Pow3rVGGT
 from mapanything.models.external.pow3r_vggt.utils.geometry import (
     closed_form_inverse_se3,
@@ -27,7 +28,6 @@ from mapanything.models.external.pow3r_vggt.utils.rotation import (
     mat_to_quat,
     quat_to_mat,
 )
-from mapanything.models.external.pow3r_vggt.heads.scale_head import *
 from mapanything.utils.geometry import (
     convert_ray_dirs_depth_along_ray_pose_trans_quats_to_pointmap,
     convert_z_depth_to_depth_along_ray,
@@ -57,48 +57,44 @@ def apply_depth_sparsification(depths, sparsification_factor=0.1):
 
     # Calculate percentiles for each view separately - vectorized version
     mask = torch.zeros_like(depths, dtype=torch.bool)
-    
+
     # Vectorized processing across all views
     B, V, H, W = depths.shape
     depths_flat = depths.view(B * V, -1)  # (B*V, H*W)
     valid_mask_flat = valid_mask.view(B * V, -1)  # (B*V, H*W)
-    
+
     for i in range(B * V):
         valid_depths = depths_flat[i][valid_mask_flat[i]]
-        
+
         if valid_depths.numel() > 0:
             # Calculate 5th and 95th percentiles on GPU
             p5 = torch.quantile(valid_depths, 0.05)
             p95 = torch.quantile(valid_depths, 0.95)
-            
+
             # Create mask for middle 90% of depth values
             depth_view = depths_flat[i].view(H, W)
             valid_view = valid_mask_flat[i].view(H, W)
-            middle_90_mask = (
-                (depth_view >= p5) & (depth_view <= p95) & valid_view
-            )
-            
+            middle_90_mask = (depth_view >= p5) & (depth_view <= p95) & valid_view
+
             # Step 2: From remaining valid pixels, keep only target fraction
             if middle_90_mask.sum() > 0:
                 target_fraction = sparsification_factor / 0.9  # 0.1111...
                 num_to_keep = int(middle_90_mask.sum().float() * target_fraction)
-                
+
                 # Get indices of valid pixels in middle 90%
                 valid_indices = torch.where(middle_90_mask)
                 if len(valid_indices[0]) > 0:
                     # Randomly select indices to keep
-                    perm = torch.randperm(
-                        len(valid_indices[0]), device=depths.device
-                    )
+                    perm = torch.randperm(len(valid_indices[0]), device=depths.device)
                     keep_indices = perm[:num_to_keep]
-                    
+
                     # Create final mask
                     final_mask = torch.zeros_like(depth_view, dtype=torch.bool)
                     final_mask[
                         valid_indices[0][keep_indices],
                         valid_indices[1][keep_indices],
                     ] = True
-                    
+
                     # Convert back to batch/view indexing
                     b_idx = i // V
                     v_idx = i % V
@@ -127,14 +123,20 @@ def scale_depths_and_poses(
         return depths_z, poses, depths_along_ray, None, None
 
     # Ensure all inputs are on the same device (prefer CUDA if available)
-    device = poses.device if poses.device.type == 'cuda' else (
-        depths_z.device if depths_z.device.type == 'cuda' else 
-        intrinsics.device if intrinsics.device.type == 'cuda' else
+    device = (
         poses.device
+        if poses.device.type == "cuda"
+        else (
+            depths_z.device
+            if depths_z.device.type == "cuda"
+            else intrinsics.device
+            if intrinsics.device.type == "cuda"
+            else poses.device
+        )
     )
-    
+
     depths_z = depths_z.to(device)
-    poses = poses.to(device) 
+    poses = poses.to(device)
     intrinsics = intrinsics.to(device)
     if depths_along_ray is not None:
         depths_along_ray = depths_along_ray.to(device)
@@ -149,30 +151,35 @@ def scale_depths_and_poses(
     depths_flat = depths_z.view(B * V, H, W)
     intrinsics_flat = intrinsics.view(B * V, 3, 3)
     poses_flat = poses.view(B * V, 3, 4)
-    
+
     # Convert all depths to camera frame points in one batch
     pts3d_cam_batch, _ = depthmap_to_camera_frame(
         depths_flat, intrinsics_flat
     )  # (B*V, H, W, 3)
-    
+
     # Ensure pts3d_cam is on the same device and dtype as poses
     pts3d_cam_batch = pts3d_cam_batch.to(device=device, dtype=poses_flat.dtype)
-    
+
     # Convert all poses to 4x4 matrices for transformation
-    pose_4x4_batch = torch.zeros(B * V, 4, 4, device=poses_flat.device, dtype=poses_flat.dtype)
+    pose_4x4_batch = torch.zeros(
+        B * V, 4, 4, device=poses_flat.device, dtype=poses_flat.dtype
+    )
     pose_4x4_batch[:, :3, :] = poses_flat
     pose_4x4_batch[:, 3, 3] = 1.0
-    
+
     # Transform all to world coordinates in batch
     pts3d_cam_homo = torch.cat(
-        [pts3d_cam_batch, torch.ones(*pts3d_cam_batch.shape[:-1], 1, device=pts3d_cam_batch.device)],
+        [
+            pts3d_cam_batch,
+            torch.ones(*pts3d_cam_batch.shape[:-1], 1, device=pts3d_cam_batch.device),
+        ],
         dim=-1,
     )  # (B*V, H, W, 4)
     pts3d_world_batch = torch.matmul(
         pts3d_cam_homo.unsqueeze(-2), pose_4x4_batch.unsqueeze(1).unsqueeze(1)
     ).squeeze(-2)  # (B*V, H, W, 4)
     pts3d_world_batch = pts3d_world_batch[..., :3]  # (B*V, H, W, 3)
-    
+
     # Reshape back to (B, V, H, W, 3)
     new_world_points = pts3d_world_batch.view(B, V, H, W, 3)
 
@@ -187,7 +194,7 @@ def scale_depths_and_poses(
 
     # Calculate distance from origin for each point
     dist = new_world_points.norm(dim=-1)  # (B, V, H, W)
-    
+
     dist_sum = (dist * point_masks.float()).sum(dim=[1, 2, 3])  # (B,)
     valid_count = point_masks.sum(dim=[1, 2, 3]).float()  # (B,)
     avg_scale = (dist_sum / (valid_count + 1e-3)).clamp(min=1e-6, max=1e6)  # (B,)
@@ -209,7 +216,13 @@ def scale_depths_and_poses(
 
     # print(avg_scale)
 
-    return new_depths, scaled_poses, scaled_depths_along_ray, new_world_points, avg_scale
+    return (
+        new_depths,
+        scaled_poses,
+        scaled_depths_along_ray,
+        new_world_points,
+        avg_scale,
+    )
 
 
 class ModelArgs:
@@ -248,13 +261,14 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         self.torch_hub_force_reload = torch_hub_force_reload
         self.load_custom_ckpt = load_custom_ckpt
         self.custom_ckpt_path = custom_ckpt_path
-        
+
         # Store input priors configuration
         if input_priors is None:
             self.input_priors = []
         else:
-            self.input_priors = input_priors if isinstance(input_priors, list) else [input_priors]
-
+            self.input_priors = (
+                input_priors if isinstance(input_priors, list) else [input_priors]
+            )
 
         # Determine dtype based on GPU capability (same pattern as VGGT)
         if torch.cuda.is_available():
@@ -281,7 +295,11 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             with open(yaml_file, "r") as f:
                 print(f"opening config file at path: {yaml_file}")
                 model_config = OmegaConf.load(f)
-            self.model = Pow3rVGGT(ablation=model_config.model.ablation, enable_scale=enable_scale, scale_head_type=scale_head_type)
+            self.model = Pow3rVGGT(
+                ablation=model_config.model.ablation,
+                enable_scale=enable_scale,
+                scale_head_type=scale_head_type,
+            )
 
             custom_ckpt = torch.load(self.custom_ckpt_path, weights_only=False)
             # Handle different checkpoint formats
@@ -301,7 +319,11 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
         else:
             args = ModelArgs()
-            self.model = Pow3rVGGT(ablation=args, enable_scale=enable_scale, scale_head_type=scale_head_type)
+            self.model = Pow3rVGGT(
+                ablation=args,
+                enable_scale=enable_scale,
+                scale_head_type=scale_head_type,
+            )
             self.default_path = "/work/weights/vggt/model.pt"
             custom_ckpt = torch.load(self.default_path, weights_only=False)
 
@@ -462,8 +484,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
         # Debug I/O operations removed for performance - all data transfers to CPU eliminated
 
-        depths_z, poses, depths_along_ray, world_points, B_scales = scale_depths_and_poses(
-            depths_z, poses, intrinsics, depths_along_ray
+        depths_z, poses, depths_along_ray, world_points, B_scales = (
+            scale_depths_and_poses(depths_z, poses, intrinsics, depths_along_ray)
         )
         # Debug prints removed for performance
 
@@ -478,7 +500,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         #     depths_z = depths_z * torch.log1p(org_d)  # scale by log(1+norm)
         #     # Squeeze back to (B, S, H, W)
         #     depths_z = depths_z.squeeze(-1)  # (B, S, H, W)
-            
+
         # if depths_along_ray is not None:
         #     # Expand (B, S, H, W) to (B, S, H, W, 1) for log normalization
         #     depths_along_ray = depths_along_ray.unsqueeze(-1)  # (B, S, H, W, 1)
@@ -489,22 +511,21 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         #     # Squeeze back to (B, S, H, W)
         #     depths_along_ray = depths_along_ray.squeeze(-1)  # (B, S, H, W)
 
-
         # Convert input format to what the model expects
         # Use input_priors to control which inputs are passed to the model
         model_intrinsics = None
         model_poses = None
         model_depths = None
-        
+
         if "intrinsics" in self.input_priors and intrinsics is not None:
             model_intrinsics = intrinsics.to(images.device)
             # print("using intrinsics")
-            
+
         if "extrinsics" in self.input_priors and poses is not None:
             model_poses = poses.to(images.device)
             # print(model_poses)
             # print("using extrinsics")
-            
+
         if depths_z is not None:
             model_depths = depths_z.to(images.device)
 
@@ -529,10 +550,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             scale = model_output["scale"]  # Scale predictions
             scale = scale.view(-1, 1, 1, 1, 1)
 
-     
-    
             # Multiply depth map by scale
-            depth_map = depth_map * scale  # (B, V, H, W, 1)    
+            depth_map = depth_map * scale  # (B, V, H, W, 1)
 
             # Extrinsic and intrinsic matrices from pose encoding
             extrinsic, intrinsic = pose_encoding_to_extri_intri(
@@ -559,7 +578,11 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
                 # Convert the extrinsics to quaternions and translations
                 translation = curr_view_extrinsic[..., :3, 3]
-                scale_for_view = scale[:, view_idx, 0, 0, 0] if scale.shape[1] > view_idx else scale[:, 0, 0, 0, 0]
+                scale_for_view = (
+                    scale[:, view_idx, 0, 0, 0]
+                    if scale.shape[1] > view_idx
+                    else scale[:, 0, 0, 0, 0]
+                )
                 curr_view_cam_translations = translation * scale_for_view.unsqueeze(-1)
                 curr_view_cam_quats = mat_to_quat(curr_view_extrinsic[..., :3, :3])
 
@@ -601,7 +624,8 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
 
 def build_intrinsics_from_pose_enc(
-    pose_encoding, image_size_hw=None,
+    pose_encoding,
+    image_size_hw=None,
 ):
     """Convert a pose encoding back to camera intrinsics from field of view."""
     fov_h = pose_encoding[..., 7]
@@ -610,11 +634,15 @@ def build_intrinsics_from_pose_enc(
     H, W = image_size_hw
     fy = (H / 2.0) / torch.tan(fov_h / 2.0)
     fx = (W / 2.0) / torch.tan(fov_w / 2.0)
-    intrinsics = torch.zeros(pose_encoding.shape[:2] + (3, 3), dtype=pose_encoding.dtype, device=pose_encoding.device)
+    intrinsics = torch.zeros(
+        pose_encoding.shape[:2] + (3, 3),
+        dtype=pose_encoding.dtype,
+        device=pose_encoding.device,
+    )
     intrinsics[..., 0, 0] = fx
     intrinsics[..., 1, 1] = fy
     intrinsics[..., 0, 2] = W / 2
     intrinsics[..., 1, 2] = H / 2
     intrinsics[..., 2, 2] = 1.0
-  
+
     return intrinsics
