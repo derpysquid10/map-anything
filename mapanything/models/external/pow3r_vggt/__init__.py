@@ -33,6 +33,7 @@ from mapanything.utils.geometry import (
     convert_z_depth_to_depth_along_ray,
     depthmap_to_camera_frame,
     get_rays_in_camera_frame,
+    normalize_multiple_pointclouds,
 )
 
 
@@ -54,45 +55,54 @@ def apply_depth_sparsification(depths, sparsification_factor=0.1):
     # Step 1: Remove top 5% and bottom 5% of depths (outlier removal)
     valid_mask = depths > 0  # Only consider non-zero depths
 
-    # Calculate percentiles for each view separately
+    # Calculate percentiles for each view separately - vectorized version
     mask = torch.zeros_like(depths, dtype=torch.bool)
-    for b in range(depths.shape[0]):
-        for v in range(depths.shape[1]):
-            depth_view = depths[b, v]
-            valid_depths = depth_view[valid_mask[b, v]]
-
-            if valid_depths.numel() > 0:
-                # Calculate 5th and 95th percentiles
-                p5 = torch.quantile(valid_depths, 0.05)
-                p95 = torch.quantile(valid_depths, 0.95)
-
-                # Create mask for middle 90% of depth values
-                middle_90_mask = (
-                    (depth_view >= p5) & (depth_view <= p95) & valid_mask[b, v]
-                )
-
-                # Step 2: From remaining valid pixels, keep only 11.11% to get 10% total
-                # (90% * 11.11% ≈ 10%)
-                if middle_90_mask.sum() > 0:
-                    target_fraction = sparsification_factor / 0.9  # 0.1111...
-                    num_to_keep = int(middle_90_mask.sum().float() * target_fraction)
-
-                    # Get indices of valid pixels in middle 90%
-                    valid_indices = torch.where(middle_90_mask)
-                    if len(valid_indices[0]) > 0:
-                        # Randomly select indices to keep
-                        perm = torch.randperm(
-                            len(valid_indices[0]), device=depths.device
-                        )
-                        keep_indices = perm[:num_to_keep]
-
-                        # Create final mask
-                        final_mask = torch.zeros_like(depth_view, dtype=torch.bool)
-                        final_mask[
-                            valid_indices[0][keep_indices],
-                            valid_indices[1][keep_indices],
-                        ] = True
-                        mask[b, v] = final_mask
+    
+    # Vectorized processing across all views
+    B, V, H, W = depths.shape
+    depths_flat = depths.view(B * V, -1)  # (B*V, H*W)
+    valid_mask_flat = valid_mask.view(B * V, -1)  # (B*V, H*W)
+    
+    for i in range(B * V):
+        valid_depths = depths_flat[i][valid_mask_flat[i]]
+        
+        if valid_depths.numel() > 0:
+            # Calculate 5th and 95th percentiles on GPU
+            p5 = torch.quantile(valid_depths, 0.05)
+            p95 = torch.quantile(valid_depths, 0.95)
+            
+            # Create mask for middle 90% of depth values
+            depth_view = depths_flat[i].view(H, W)
+            valid_view = valid_mask_flat[i].view(H, W)
+            middle_90_mask = (
+                (depth_view >= p5) & (depth_view <= p95) & valid_view
+            )
+            
+            # Step 2: From remaining valid pixels, keep only target fraction
+            if middle_90_mask.sum() > 0:
+                target_fraction = sparsification_factor / 0.9  # 0.1111...
+                num_to_keep = int(middle_90_mask.sum().float() * target_fraction)
+                
+                # Get indices of valid pixels in middle 90%
+                valid_indices = torch.where(middle_90_mask)
+                if len(valid_indices[0]) > 0:
+                    # Randomly select indices to keep
+                    perm = torch.randperm(
+                        len(valid_indices[0]), device=depths.device
+                    )
+                    keep_indices = perm[:num_to_keep]
+                    
+                    # Create final mask
+                    final_mask = torch.zeros_like(depth_view, dtype=torch.bool)
+                    final_mask[
+                        valid_indices[0][keep_indices],
+                        valid_indices[1][keep_indices],
+                    ] = True
+                    
+                    # Convert back to batch/view indexing
+                    b_idx = i // V
+                    v_idx = i % V
+                    mask[b_idx, v_idx] = final_mask
 
     return depths * mask.float()
 
@@ -134,41 +144,37 @@ def scale_depths_and_poses(
     # Create point mask for valid depths
     point_masks = depths_z > 0  # (B, V, H, W)
 
-    # Calculate world points for each view
-    world_points_list = []
-    for v in range(V):
-        # Get camera frame points for this view
-        view_depth = depths_z[:, v]  # (B, H, W)
-        view_intrinsic = intrinsics[:, v]  # (B, 3, 3)
-        view_pose = poses[:, v]  # (B, 3, 4)
-
-        # Convert depth to camera frame points
-        pts3d_cam, _ = depthmap_to_camera_frame(
-            view_depth, view_intrinsic
-        )  # (B, H, W, 3)
-        
-        # Ensure pts3d_cam is on the same device and dtype as poses
-        pts3d_cam = pts3d_cam.to(device=device, dtype=view_pose.dtype)
-
-        # Convert pose to 4x4 matrix for transformation
-        pose_4x4 = torch.zeros(B, 4, 4, device=view_pose.device, dtype=view_pose.dtype)
-        pose_4x4[:, :3, :] = view_pose
-        pose_4x4[:, 3, 3] = 1.0
-
-        # Transform to world coordinates
-        pts3d_cam_homo = torch.cat(
-            [pts3d_cam, torch.ones(*pts3d_cam.shape[:-1], 1, device=pts3d_cam.device)],
-            dim=-1,
-        )  # (B, H, W, 4)
-        pts3d_world = torch.matmul(
-            pts3d_cam_homo.unsqueeze(-2), pose_4x4.unsqueeze(1).unsqueeze(1)
-        ).squeeze(-2)  # (B, H, W, 4)
-        pts3d_world = pts3d_world[..., :3]  # (B, H, W, 3)
-
-        world_points_list.append(pts3d_world)
-
-    # Stack world points: (B, V, H, W, 3)
-    new_world_points = torch.stack(world_points_list, dim=1)
+    # Calculate world points for all views in batch - vectorized version
+    # Reshape for batch processing: (B*V, H, W)
+    depths_flat = depths_z.view(B * V, H, W)
+    intrinsics_flat = intrinsics.view(B * V, 3, 3)
+    poses_flat = poses.view(B * V, 3, 4)
+    
+    # Convert all depths to camera frame points in one batch
+    pts3d_cam_batch, _ = depthmap_to_camera_frame(
+        depths_flat, intrinsics_flat
+    )  # (B*V, H, W, 3)
+    
+    # Ensure pts3d_cam is on the same device and dtype as poses
+    pts3d_cam_batch = pts3d_cam_batch.to(device=device, dtype=poses_flat.dtype)
+    
+    # Convert all poses to 4x4 matrices for transformation
+    pose_4x4_batch = torch.zeros(B * V, 4, 4, device=poses_flat.device, dtype=poses_flat.dtype)
+    pose_4x4_batch[:, :3, :] = poses_flat
+    pose_4x4_batch[:, 3, 3] = 1.0
+    
+    # Transform all to world coordinates in batch
+    pts3d_cam_homo = torch.cat(
+        [pts3d_cam_batch, torch.ones(*pts3d_cam_batch.shape[:-1], 1, device=pts3d_cam_batch.device)],
+        dim=-1,
+    )  # (B*V, H, W, 4)
+    pts3d_world_batch = torch.matmul(
+        pts3d_cam_homo.unsqueeze(-2), pose_4x4_batch.unsqueeze(1).unsqueeze(1)
+    ).squeeze(-2)  # (B*V, H, W, 4)
+    pts3d_world_batch = pts3d_world_batch[..., :3]  # (B*V, H, W, 3)
+    
+    # Reshape back to (B, V, H, W, 3)
+    new_world_points = pts3d_world_batch.view(B, V, H, W, 3)
 
     # Clone inputs for scaling
     new_depths = depths_z.clone()
@@ -200,6 +206,8 @@ def scale_depths_and_poses(
     scaled_depths_along_ray = None
     if depths_along_ray is not None:
         scaled_depths_along_ray = depths_along_ray / avg_scale.view(-1, 1, 1, 1)
+
+    # print(avg_scale)
 
     return new_depths, scaled_poses, scaled_depths_along_ray, new_world_points, avg_scale
 
@@ -233,12 +241,20 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         custom_ckpt_path=None,
         enable_scale=True,
         scale_head_type="ScaleHead_MLP_LCP",
+        input_priors=None,
     ):
         super().__init__()
         self.name = name
         self.torch_hub_force_reload = torch_hub_force_reload
         self.load_custom_ckpt = load_custom_ckpt
         self.custom_ckpt_path = custom_ckpt_path
+        
+        # Store input priors configuration
+        if input_priors is None:
+            self.input_priors = []
+        else:
+            self.input_priors = input_priors if isinstance(input_priors, list) else [input_priors]
+
 
         # Determine dtype based on GPU capability (same pattern as VGGT)
         if torch.cuda.is_available():
@@ -376,11 +392,9 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         poses = None
 
         # Debug: Print available keys in first view
-        print(f"[DEBUG] Available keys in views[0]: {list(views[0].keys())}")
 
         # Check if poses are provided (RMVD provides trans + quats)
         if "camera_pose_trans" in views[0] and "camera_pose_quats" in views[0]:
-            print("[DEBUG] Found camera_pose_trans and camera_pose_quats format")
             # Convert from translation + quaternion to 3x4 matrix format
             # RMVD provides poses in the format expected by MapAnything models
 
@@ -395,7 +409,6 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 )  # (B, 3, 4)
                 pose_matrices.append(pose_3x4)
             poses = torch.stack(pose_matrices, dim=1)  # (B, V, 3, 4)
-            print(f"[DEBUG] Created poses from trans+quats, shape: {poses.shape}")
 
             # normalize poses such that they are with respect to the first view in each batch
             # Convert 3x4 to 4x4 for easier matrix operations
@@ -447,61 +460,12 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 depths_along_ray, sparsification_factor
             )
 
-        # Save inputs to /home/binbin/gtan/map-anything/benchmarking
-        save_dir = Path("/home/binbin/gtan/map-anything/benchmarking/inputs")
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save z depths as viridis colormap images
-        if depths_z is not None:
-            for view_idx in range(num_views):
-                depth_np = depths_z[0, view_idx].cpu().numpy()  # Take first batch
-                plt.figure(figsize=(10, 8))
-                plt.imshow(depth_np, cmap="viridis")
-                plt.colorbar()
-                plt.title(f"Z Depth - View {view_idx}")
-                plt.savefig(
-                    save_dir / f"depth_z_view_{view_idx}.jpg",
-                    dpi=150,
-                    bbox_inches="tight",
-                )
-                plt.close()
-
-        # Save intrinsics to txt files
-        if intrinsics is not None:
-            for view_idx in range(num_views):
-                intrinsic_np = intrinsics[0, view_idx].cpu().numpy()  # Take first batch
-                np.savetxt(
-                    save_dir / f"intrinsics_view_{view_idx}.txt",
-                    intrinsic_np,
-                    fmt="%.6f",
-                )
-
-        # Save poses to txt files
-        if poses is not None:
-            for view_idx in range(num_views):
-                pose_np = poses[0, view_idx].float().cpu().numpy()  # Convert to float32 then numpy
-                np.savetxt(save_dir / f"pose_view_{view_idx}.txt", pose_np, fmt="%.6f")
-
-        # Save images
-        for view_idx in range(num_views):
-            img_tensor = images[0, view_idx]  # Take first batch: (C, H, W)
-            # Convert from tensor to numpy and transpose to (H, W, C)
-            img_np = img_tensor.cpu().numpy().transpose(1, 2, 0)
-            # Normalize to [0, 1] if needed
-            if img_np.min() < 0 or img_np.max() > 1:
-                img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
-            # Convert to uint8
-            img_np = (img_np * 255).astype(np.uint8)
-            # Save as image
-            Image.fromarray(img_np).save(save_dir / f"image_view_{view_idx}.jpg")
+        # Debug I/O operations removed for performance - all data transfers to CPU eliminated
 
         depths_z, poses, depths_along_ray, world_points, B_scales = scale_depths_and_poses(
             depths_z, poses, intrinsics, depths_along_ray
         )
-        if world_points is not None:
-            print("[DEBUG] Applied point-based scaling")
-        else:
-            print("[DEBUG] Skipping point-based scaling - missing required inputs")
+        # Debug prints removed for performance
 
         # import pdb
         # pdb.set_trace()
@@ -527,15 +491,19 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
 
         # Convert input format to what the model expects
+        # Use input_priors to control which inputs are passed to the model
         model_intrinsics = None
         model_poses = None
         model_depths = None
         
-        if intrinsics is not None:
+        if "intrinsics" in self.input_priors and intrinsics is not None:
             model_intrinsics = intrinsics.to(images.device)
+            # print("using intrinsics")
             
-        if poses is not None:
+        if "extrinsics" in self.input_priors and poses is not None:
             model_poses = poses.to(images.device)
+            # print(model_poses)
+            # print("using extrinsics")
             
         if depths_z is not None:
             model_depths = depths_z.to(images.device)
@@ -559,9 +527,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             depth_map = model_output["depth"]  # (B, V, H, W, 1)
             depth_conf = model_output["depth_conf"]  # (B, V, H, W)
             scale = model_output["scale"]  # Scale predictions
-            print(f"[DEBUG] Original scale shape: {scale.shape}")
             scale = scale.view(-1, 1, 1, 1, 1)
-            print(f"[DEBUG] Reshaped scale shape: {scale.shape}")
 
      
     
@@ -594,7 +560,6 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 # Convert the extrinsics to quaternions and translations
                 translation = curr_view_extrinsic[..., :3, 3]
                 scale_for_view = scale[:, view_idx, 0, 0, 0] if scale.shape[1] > view_idx else scale[:, 0, 0, 0, 0]
-                print(f"[DEBUG] Translation shape: {translation.shape}, Scale for view {view_idx} shape: {scale_for_view.shape}")
                 curr_view_cam_translations = translation * scale_for_view.unsqueeze(-1)
                 curr_view_cam_quats = mat_to_quat(curr_view_extrinsic[..., :3, :3])
 

@@ -26,6 +26,7 @@ from mapanything.models.external.pow3r_vggt.utils.raymap import generate_unified
 from mapanything.models.external.pow3r_vggt.utils.pose_enc import mat_to_quat
 from mapanything.models.external.pow3r_vggt.utils.rotation import normalize_camera_extrinsics_batch
 from mapanything.models.external.pow3r_vggt.utils.geometry import normalize_pose_translations, normalize_depth_values
+from mapanything.utils.geometry import closed_form_pose_inverse
 
 
 import pdb
@@ -395,6 +396,18 @@ class Pow3rAggregator(nn.Module):
         """
         B, S, C_in, H, W = images.shape
  
+        # Store original poses and invert them for world-to-camera transformation
+        original_poses = None
+        if poses is not None:
+            original_poses = poses.clone()
+            # Reshape from (B, S, 3, 4) to (B*S, 3, 4) for inversion
+            B_orig, S_orig = poses.shape[:2]
+            poses_flat = poses.view(B_orig * S_orig, 3, 4)
+            # Invert poses from camera-to-world to world-to-camera
+            poses_inverted = closed_form_pose_inverse(poses_flat)
+            # Take only the 3x4 part and reshape back to (B, S, 3, 4)
+            # Ensure it stays on the same device as the original poses
+            poses = poses_inverted[:, :3, :].to(poses.device).view(B_orig, S_orig, 3, 4)
 
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
@@ -678,6 +691,11 @@ class Pow3rAggregator(nn.Module):
         del concat_inter
         del frame_intermediates
         del global_intermediates
+        
+        # Restore original poses after processing
+        if original_poses is not None:
+            poses = original_poses
+            
         return output_list, self.patch_start_idx, cls_token, patch_tokens, pose_encodings, ray_embeddings
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, 

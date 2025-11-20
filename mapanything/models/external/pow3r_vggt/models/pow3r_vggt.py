@@ -102,7 +102,7 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
 
         predictions = {}
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             if self.camera_head is not None:
                 pose_enc_list = self.camera_head(aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
@@ -121,16 +121,16 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
                 )
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
+            if self.scale_head is not None:
+                ## Normal Head
+                if "MoE" not in self.scale_head_type and self.scale_head_type!= "none":
+                    scale = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, B, S) # gt_scale, areas, B, S)  # for scale head ##poses
+                else:
+                    ## MoE
+                    scale, cls_pred = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, gt_areas, data_iter, B, S) #, phase) # gt_scale, areas, B, S)  # for scale head ##poses
+                    predictions["cls_pred"] = cls_pred  # gating network output for MoE
 
-            ## Normal Head
-            if "MoE" not in self.scale_head_type and self.scale_head_type!= "none":
-                scale = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, B, S) # gt_scale, areas, B, S)  # for scale head ##poses
-            else:
-                ## MoE
-                scale, cls_pred = self.scale_head(aggregated_tokens_list, cls_token, patch_tokens, pose_encodings, ray_embeddings, gt_areas, data_iter, B, S) #, phase) # gt_scale, areas, B, S)  # for scale head ##poses
-                predictions["cls_pred"] = cls_pred  # gating network output for MoE
-
-            predictions["scale"] = scale
+                predictions["scale"] = scale
 
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(
