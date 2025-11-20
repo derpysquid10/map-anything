@@ -358,6 +358,13 @@ class Aggregator(nn.Module):
 
         return tokens, global_idx, intermediates
 
+    def to(self, *args, **kwargs):
+        """Override to method to ensure DINOv2 patch_embed moves to the same device."""
+        self = super().to(*args, **kwargs)
+        if hasattr(self, 'patch_embed') and hasattr(self.patch_embed, 'to'):
+            self.patch_embed = self.patch_embed.to(*args, **kwargs)
+        return self
+
 
 def slice_expand_and_flatten(token_tensor, B, S):
     """

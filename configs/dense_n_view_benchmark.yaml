@@ -21,3 +21,5 @@ batch_size: 10
 amp: 1
 # Floating point type to use for mixed precision
 amp_dtype: "bf16"
+# Input priors to use (can include: intrinsics, extrinsics)
+input_priors: []

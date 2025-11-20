@@ -9,6 +9,6 @@ root_experiments_dir: /home/binbin/gtan/mapanything_experiments
 # Root directory containing UniCeption pretrained checkpoints
 root_uniception_pretrained_checkpoints_dir: ???
 # Root directory containing external benchmark data
-external_benchmark_data_root_data_dir: /mnt/nfs/SpatialAI/wai_datasets
+external_benchmark_data_root_data_dir: /mnt/nfs/SpatialAI/Datasets
 
 

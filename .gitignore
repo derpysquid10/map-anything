@@ -178,3 +178,5 @@ cython_debug/
 pc_sanity_vggt/
 depths_viz/
 multi_pow3r_fix_intri/
+
+inputs/

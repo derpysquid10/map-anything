@@ -362,13 +362,12 @@ class BaseDataset(EasyDataset):
                 # Get the pairwise covisibility for the current node
                 if use_bidirectional_covis:
                     # Use bidirectional covisibility (slower for large memory-mapped arrays)
-                    pairwise_covisibility = (
-                        scene_pairwise_covisibility[current, :]
-                        + scene_pairwise_covisibility[:, current].T
-                    ) / 2
+                    row_covis = np.asarray(scene_pairwise_covisibility[current, :])
+                    col_covis = np.asarray(scene_pairwise_covisibility[:, current]).T
+                    pairwise_covisibility = (row_covis + col_covis) / 2
                 else:
                     # Use only row access (faster for large memory-mapped arrays)
-                    pairwise_covisibility = scene_pairwise_covisibility[current, :]
+                    pairwise_covisibility = np.asarray(scene_pairwise_covisibility[current, :])
                 # Normalize the covisibility using self covisibility
                 pairwise_covisibility = pairwise_covisibility / (
                     pairwise_covisibility[current] + 1e-8
