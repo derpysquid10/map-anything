@@ -17,11 +17,11 @@ PYTHON_SCRIPT="benchmarking/dense_n_view/benchmark.py"
 MACHINE="default"
 NUM_WORKERS="12"
 MODEL="mapanything"
-TASK="img_intri"
+TASK="img_pose"
 USES_TORCH_HUB="false"
 PRETRAINED_PATH="/mnt/nfs/SpatialAI/weights/mapanything/converted_checkpoint.pth"
 BASE_OUTPUT_DIR="/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking"
-OUTPUT_DIR_SUFFIX="mapa_img_intri"
+OUTPUT_DIR_SUFFIX="mapa_img_pose3"
 PRINCIPAL_POINT_CENTERED="true"
 
 # Function to get available free GPUs (100MB or less used)
@@ -61,7 +61,7 @@ batch_sizes_and_views=(
     "3 24 benchmark_518_eth3d_snpp_tav2"
     "2 32 benchmark_518_eth3d_snpp_tav2"
     "1 50 benchmark_518_eth3d_snpp_tav2"
-    "1 100 benchmark_518_eth3d_snpp_tav2"
+    # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 # Get initial list of free GPUs

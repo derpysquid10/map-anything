@@ -535,7 +535,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 images=images,
                 intrinsics=model_intrinsics,
                 poses=model_poses,
-                depths=None,
+                depths=model_depths,
                 # scale=1.0 / B_scales if B_scales is not None else None,
                 scale=None,
                 injection_masks=None,

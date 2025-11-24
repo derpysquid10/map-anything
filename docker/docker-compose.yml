@@ -1,7 +1,7 @@
 services:
 
-  vggt_mapanything:
-    image: vggt_gtan1:v2
+  vggt_mapanything2:
+    image: vggt:gtan
     shm_size: 12G
     container_name: vggt_mapanything
     stdin_open: true

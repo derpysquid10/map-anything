@@ -16,7 +16,7 @@ batch_sizes_and_views=(
     "4 24 benchmark_518_eth3d_snpp_tav2"
     "2 32 benchmark_518_eth3d_snpp_tav2"
     "1 50 benchmark_518_eth3d_snpp_tav2"
-    "1 100 benchmark_518_eth3d_snpp_tav2"
+    # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 # Loop through each combination

@@ -43,11 +43,11 @@ get_next_gpu() {
 batch_sizes_and_views=(
     # "1 2 benchmark_518_eth3d_snpp_tav2"
     # "10 4 benchmark_518_eth3d_snpp_tav2"
-    # "10 8 benchmark_518_eth3d_snpp_tav2"
+    "10 8 benchmark_518_eth3d_snpp_tav2"
     # "5 16 benchmark_518_eth3d_snpp_tav2"
     # "1 50 benchmark_518_eth3d_snpp_tav2"
-    "2 32 benchmark_518_eth3d_snpp_tav2"
-    "4 24 benchmark_518_eth3d_snpp_tav2"
+    # "2 32 benchmark_518_eth3d_snpp_tav2"
+    # "4 24 benchmark_518_eth3d_snpp_tav2"
     
     
     # "1 100 benchmark_518_eth3d_snpp_tav2"
@@ -56,7 +56,7 @@ batch_sizes_and_views=(
 prior_combinations=(
     # "[]"
     # "[intrinsics]"
-    "[extrinsics]"
+    # "[extrinsics]"
     "[intrinsics,extrinsics]"
 )
 
@@ -96,8 +96,10 @@ run_benchmark_job() {
         model=pow3r_vggt \
         model.model_config.load_custom_ckpt=true \
         model.model_config.custom_ckpt_path="/mnt/nfs/binbin/weights/prob_multi_unnormalized_tartan_scannetpp/checkpoint_0.pt" \
-        hydra.run.dir='/mnt/nfs/mapanything/benchmarking/dense_'"${num_views}"'_view/2week_fixed_extri_inv_'"${prior_dir_name}" \
-        input_priors=$prior_combo
+        hydra.run.dir='/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking/dense_'"${num_views}"'_view/2week_depth_'"${prior_dir_name}" \
+        input_priors=$prior_combo \
+        dataset.principal_point_centered=true
+
     
     echo "Finished job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
 }
