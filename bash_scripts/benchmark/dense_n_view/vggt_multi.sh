@@ -12,16 +12,15 @@ export CUDA_DEVICE_MAX_CONNECTIONS=32
 export SAVE_DEBUG_FILES=false
 
 # Configurable benchmark arguments
-BENCHMARK_SCRIPT="python3"
+BENCHMARK_SCRIPT="/workspace/run_benchmark_with_conda.sh"
 PYTHON_SCRIPT="benchmarking/dense_n_view/benchmark.py"
 MACHINE="default"
-NUM_WORKERS="12"
-MODEL="mapanything"
-TASK="img_intri"
-USES_TORCH_HUB="false"
-PRETRAINED_PATH="/mnt/nfs/SpatialAI/weights/mapanything/converted_checkpoint.pth"
+NUM_WORKERS="16"
+MODEL="vggt"
+LOAD_CUSTOM_CKPT="false"
+CUSTOM_CKPT_PATH="/mnt/nfs/SpatialAI/moma/logs/final_pose_cam_both0.5probs/checkpoint_0_38000.pt"
 BASE_OUTPUT_DIR="/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking"
-OUTPUT_DIR_SUFFIX="mapa_img_intri3"
+OUTPUT_DIR_SUFFIX="vggt"
 PRINCIPAL_POINT_CENTERED="true"
 
 # Function to get available free GPUs (100MB or less used)
@@ -58,10 +57,19 @@ batch_sizes_and_views=(
     "10 4 benchmark_518_eth3d_snpp_tav2"
     "10 8 benchmark_518_eth3d_snpp_tav2"
     "5 16 benchmark_518_eth3d_snpp_tav2"
-    "3 24 benchmark_518_eth3d_snpp_tav2"
-    # "2 32 benchmark_518_eth3d_snpp_tav2"
-    # "1 50 benchmark_518_eth3d_snpp_tav2"
-    "1 100 benchmark_518_eth3d_snpp_tav2"
+    "1 50 benchmark_518_eth3d_snpp_tav2"
+    "2 32 benchmark_518_eth3d_snpp_tav2"
+    "4 24 benchmark_518_eth3d_snpp_tav2"
+    
+    
+    # "1 100 benchmark_518_eth3d_snpp_tav2"
+)
+
+prior_combinations=(
+    "[]"
+    # "[intrinsics]"
+    # "[extrinsics]"
+    # "[intrinsics,extrinsics]"
 )
 
 # Get initial list of free GPUs
@@ -79,6 +87,7 @@ declare -a job_pids=()
 declare -a job_gpus=()
 declare -a running_jobs=()
 
+
 # Generate all job combinations and create command queue
 declare -a command_queue=()
 declare -a queue_descriptions=()
@@ -86,12 +95,18 @@ declare -a queue_descriptions=()
 echo "Creating command queue..."
 for combo in "${batch_sizes_and_views[@]}"; do
     read -r batch_size num_views dataset <<< "$combo"
-    
-    # Create the full command using configurable variables
-    cmd="CUDA_VISIBLE_DEVICES=GPU_PLACEHOLDER $BENCHMARK_SCRIPT $PYTHON_SCRIPT machine=$MACHINE dataset=$dataset dataset.num_workers=$NUM_WORKERS dataset.num_views=$num_views batch_size=$batch_size model=$MODEL model/task=$TASK model.encoder.uses_torch_hub=$USES_TORCH_HUB model.pretrained=\"$PRETRAINED_PATH\" hydra.run.dir='$BASE_OUTPUT_DIR/dense_${num_views}_view/$OUTPUT_DIR_SUFFIX' dataset.principal_point_centered=$PRINCIPAL_POINT_CENTERED"
-    
-    command_queue+=("$cmd")
-    queue_descriptions+=("bs${batch_size}_nv${num_views}_${dataset}")
+    for prior_combo in "${prior_combinations[@]}"; do
+        prior_dir_name=$(echo "$prior_combo" | sed 's/\[\]//g' | sed 's/\[//g' | sed 's/\]//g' | sed 's/,/_/g')
+        if [ -z "$prior_dir_name" ]; then
+            prior_dir_name="no_priors"
+        fi
+        
+        # Create the full command using configurable variables
+        cmd="$BENCHMARK_SCRIPT GPU_PLACEHOLDER $PYTHON_SCRIPT machine=$MACHINE dataset=$dataset dataset.num_workers=$NUM_WORKERS dataset.num_views=$num_views batch_size=$batch_size model=$MODEL hydra.run.dir='$BASE_OUTPUT_DIR/dense_${num_views}_view/${OUTPUT_DIR_SUFFIX}_${prior_dir_name}' dataset.principal_point_centered=$PRINCIPAL_POINT_CENTERED"
+        
+        command_queue+=("$cmd")
+        queue_descriptions+=("bs${batch_size}_nv${num_views}_${prior_dir_name}")
+    done
 done
 
 echo "Created command queue with ${#command_queue[@]} commands"

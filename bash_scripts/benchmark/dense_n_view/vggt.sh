@@ -9,14 +9,14 @@ export HYDRA_FULL_ERROR=1
 
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    "10 2 benchmark_518_eth3d_snpp_tav2"
-    "10 4 benchmark_518_eth3d_snpp_tav2"
-    "10 8 benchmark_518_eth3d_snpp_tav2"
-    "5 16 benchmark_518_eth3d_snpp_tav2"
-    "4 24 benchmark_518_eth3d_snpp_tav2"
+    # "10 2 benchmark_518_eth3d_snpp_tav2"
+    # "10 4 benchmark_518_eth3d_snpp_tav2"
+    # "10 8 benchmark_518_eth3d_snpp_tav2"
+    # "5 16 benchmark_518_eth3d_snpp_tav2"
+    # "4 24 benchmark_518_eth3d_snpp_tav2"
     "2 32 benchmark_518_eth3d_snpp_tav2"
-    "1 50 benchmark_518_eth3d_snpp_tav2"
-    "1 100 benchmark_518_eth3d_snpp_tav2"
+    # "1 50 benchmark_518_eth3d_snpp_tav2"
+    # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 # Loop through each combination
@@ -34,7 +34,9 @@ for combo in "${batch_sizes_and_views[@]}"; do
         dataset.num_views=$num_views \
         batch_size=$batch_size \
         model=vggt \
-        hydra.run.dir='${root_experiments_dir}/mapanything/benchmarking/dense_'"${num_views}"'_view/vggt'
+        hydra.run.dir='/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking/dense_'"${num_views}"'_view/vggt' \
+        dataset.principal_point_centered=true
+
 
     echo "Finished running $dataset with batch_size=$batch_size and num_views=$num_views"
 done

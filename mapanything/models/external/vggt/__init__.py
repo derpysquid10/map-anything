@@ -32,6 +32,7 @@ class VGGTWrapper(torch.nn.Module):
         intermediate_layer_idx=[4, 11, 17, 23],
         load_custom_ckpt=False,
         custom_ckpt_path=None,
+        input_priors=None,
     ):
         super().__init__()
         self.name = name

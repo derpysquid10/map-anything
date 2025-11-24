@@ -3,7 +3,7 @@
 python \
 	benchmarking/rmvd_mvs_benchmark/benchmark.py \
 	machine=default \
-	eval_dataset=kitti \
+	eval_dataset=eth3d \
 	evaluation_conditioning=image \
 	evaluation_alignment=median \
 	evaluation_views=multi_view \

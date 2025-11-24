@@ -42,9 +42,9 @@ get_next_gpu() {
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
     # "1 2 benchmark_518_eth3d_snpp_tav2"
-    "10 4 benchmark_518_eth3d_snpp_tav2"
-    # "10 8 benchmark_518_eth3d_snpp_tav2"
-    # "5 16 benchmark_518_eth3d_snpp_tav2"
+    # "10 4 benchmark_518_eth3d_snpp_tav2"
+    "10 8 benchmark_518_eth3d_snpp_tav2"
+    "5 16 benchmark_518_eth3d_snpp_tav2"
     # "1 50 benchmark_518_eth3d_snpp_tav2"
     # "2 32 benchmark_518_eth3d_snpp_tav2"
     # "4 24 benchmark_518_eth3d_snpp_tav2"

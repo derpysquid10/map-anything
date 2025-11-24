@@ -9,4 +9,5 @@ python \
 	evaluation_views=multi_view \
 	hydra.run.dir="\${root_experiments_dir}/mapanything/benchmarking/rmvd_image_median_multi_view/kitti/vggt" \
 	model=vggt \
-	evaluation_resolution=\${dataset.resolution_options.518_3_20_ar} \
+	evaluation_resolution=\${dataset.resolution_options.518_1_52_ar} \
+	# dataset.principal_point_centered=true

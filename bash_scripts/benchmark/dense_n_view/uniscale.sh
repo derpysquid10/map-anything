@@ -18,47 +18,29 @@ get_free_gpus() {
     tr '\n' ' '
 }
 
-# Function to get next available GPU
-get_next_gpu() {
-    local free_gpus=($1)
-    local gpu_jobs=("${@:2}")
-    
-    for gpu in "${free_gpus[@]}"; do
-        local gpu_busy=false
-        for job_gpu in "${gpu_jobs[@]}"; do
-            if [[ "$job_gpu" == "$gpu" ]]; then
-                gpu_busy=true
-                break
-            fi
-        done
-        if [[ "$gpu_busy" == false ]]; then
-            echo $gpu
-            return
-        fi
-    done
-    echo ""
-}
-
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    # "1 2 benchmark_518_eth3d_snpp_tav2"
-    # "10 4 benchmark_518_eth3d_snpp_tav2"
+    "10 2 benchmark_518_eth3d_snpp_tav2"
+    "10 4 benchmark_518_eth3d_snpp_tav2"
     "10 8 benchmark_518_eth3d_snpp_tav2"
-    # "5 16 benchmark_518_eth3d_snpp_tav2"
+    "5 16 benchmark_518_eth3d_snpp_tav2"
     # "1 50 benchmark_518_eth3d_snpp_tav2"
     # "2 32 benchmark_518_eth3d_snpp_tav2"
-    # "4 24 benchmark_518_eth3d_snpp_tav2"
+    "4 24 benchmark_518_eth3d_snpp_tav2"
     
     
     # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 prior_combinations=(
-    # "[]"
+    "[]"
     "[intrinsics]"
-    # "[extrinsics]"
+    "[extrinsics]"
     "[intrinsics,extrinsics]"
 )
+
+# Base output directory
+BASE_OUTPUT="/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking"
 
 # Get initial list of free GPUs
 echo "Detecting available GPUs..."
@@ -70,71 +52,22 @@ if [ ${#free_gpus[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Arrays to track running jobs
-declare -a job_pids=()
-declare -a job_gpus=()
-declare -a running_jobs=()
+NUM_GPUS=${#free_gpus[@]}
 
-# Function to run a single benchmark job
-run_benchmark_job() {
-    local gpu=$1
-    local batch_size=$2
-    local num_views=$3
-    local dataset=$4
-    local prior_combo=$5
-    local prior_dir_name=$6
-    
-    echo "Starting job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
-    
-    /workspace/run_benchmark_with_conda.sh $gpu \
-        benchmarking/dense_n_view/benchmark.py \
-        machine=default \
-        dataset=$dataset \
-        dataset.num_workers=16 \
-        dataset.num_views=$num_views \
-        batch_size=$batch_size \
-        model=pow3r_vggt \
-        model.model_config.load_custom_ckpt=true \
-        model.model_config.custom_ckpt_path="/mnt/nfs/SpatialAI/moma/logs/final_pose_cam_both0.5probs/checkpoint_0_38000.pt" \
-        hydra.run.dir='/mnt/nfs/mapanything/benchmarking/dense_'"${num_views}"'_view/uniscale38k_inv_center_intri'"${prior_dir_name}" \
-        input_priors=$prior_combo \
-        dataset.principal_point_centered=true
-    
-    echo "Finished job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
-}
+# Counter for tracking jobs
+job_count=0
 
-# Function to wait for a free GPU and clean up finished jobs
-wait_for_free_gpu() {
-    while true; do
-        # Check for finished jobs
-        for i in "${!job_pids[@]}"; do
-            if ! kill -0 "${job_pids[i]}" 2>/dev/null; then
-                echo "Job ${running_jobs[i]} on GPU ${job_gpus[i]} has finished"
-                unset job_pids[i]
-                unset job_gpus[i]
-                unset running_jobs[i]
-            fi
-        done
-        
-        # Rebuild arrays to remove gaps
-        job_pids=($(printf '%s\n' "${job_pids[@]}" | grep -v '^$'))
-        job_gpus=($(printf '%s\n' "${job_gpus[@]}" | grep -v '^$'))
-        running_jobs=($(printf '%s\n' "${running_jobs[@]}" | grep -v '^$'))
-        
-        # Try to find a free GPU
-        local available_gpu=$(get_next_gpu "${free_gpus[*]}" "${job_gpus[@]}")
-        if [[ -n "$available_gpu" ]]; then
-            echo $available_gpu
-            return
-        fi
-        
-        echo "All GPUs busy, waiting..."
-        sleep 10
-    done
-}
+# Arrays to store all job commands
+declare -a job_commands
+declare -a job_descriptions
 
-# Generate all job combinations
-declare -a all_jobs=()
+echo "=========================================="
+echo "Preparing benchmark jobs"
+echo "Running jobs in parallel across $NUM_GPUS GPUs"
+echo "=========================================="
+echo ""
+
+# Build all job commands first (without GPU assignment)
 for combo in "${batch_sizes_and_views[@]}"; do
     read -r batch_size num_views dataset <<< "$combo"
     for prior_combo in "${prior_combinations[@]}"; do
@@ -142,55 +75,130 @@ for combo in "${batch_sizes_and_views[@]}"; do
         if [ -z "$prior_dir_name" ]; then
             prior_dir_name="no_priors"
         fi
-        all_jobs+=("$batch_size|$num_views|$dataset|$prior_combo|$prior_dir_name")
+        
+        # Build the command template (GPU will be assigned dynamically)
+        cmd="/workspace/run_benchmark_with_conda.sh GPU_PLACEHOLDER"
+        cmd="$cmd benchmarking/dense_n_view/benchmark.py"
+        cmd="$cmd machine=default"
+        cmd="$cmd dataset=$dataset"
+        cmd="$cmd dataset.num_workers=16"
+        cmd="$cmd dataset.num_views=$num_views"
+        cmd="$cmd batch_size=$batch_size"
+        cmd="$cmd model=pow3r_vggt"
+        cmd="$cmd model.model_config.load_custom_ckpt=true"
+        cmd="$cmd model.model_config.custom_ckpt_path=\"/mnt/nfs/binbin/gtan_weights/no_scale_head/checkpoint_0_38000.pt\""
+        cmd="$cmd hydra.run.dir='${BASE_OUTPUT}/dense_${num_views}_view/ablation_noscalehead_${prior_dir_name}'"
+        cmd="$cmd input_priors=$prior_combo"
+        cmd="$cmd dataset.principal_point_centered=true"
+        
+        # Store command and description (GPU will be filled in later)
+        job_commands[$job_count]="$cmd"
+        job_descriptions[$job_count]="Dataset: $dataset | Batch: $batch_size | Views: $num_views | Priors: $prior_dir_name"
+        
+        job_count=$((job_count + 1))
     done
 done
 
-echo "Total jobs to run: ${#all_jobs[@]}"
+echo "Total jobs to run: $job_count"
+echo ""
 
-# Run all jobs in parallel across available GPUs
-for job in "${all_jobs[@]}"; do
-    IFS='|' read -r batch_size num_views dataset prior_combo prior_dir_name <<< "$job"
-    
-    # Wait for a free GPU
-    gpu=$(wait_for_free_gpu)
-    
-    # Start the job in background
-    run_benchmark_job "$gpu" "$batch_size" "$num_views" "$dataset" "$prior_combo" "$prior_dir_name" &
-    job_pid=$!
-    
-    # Track the job
-    job_pids+=($job_pid)
-    job_gpus+=($gpu)
-    running_jobs+=("bs${batch_size}_nv${num_views}_${prior_dir_name}")
-    
-    echo "Started job (PID: $job_pid) on GPU $gpu"
-    
-    # Small delay to prevent race conditions
-    sleep 2
-done
+# Create base output directory if it doesn't exist
+mkdir -p "$BASE_OUTPUT"
 
-# Wait for all remaining jobs to complete
-echo "Waiting for all jobs to complete..."
-while [ ${#job_pids[@]} -gt 0 ]; do
-    for i in "${!job_pids[@]}"; do
-        if ! kill -0 "${job_pids[i]}" 2>/dev/null; then
-            echo "Job ${running_jobs[i]} on GPU ${job_gpus[i]} has finished"
-            unset job_pids[i]
-            unset job_gpus[i] 
-            unset running_jobs[i]
-        fi
+# Function to run a job with assigned GPU
+run_job() {
+    local job_idx=$1
+    local gpu_id=$2
+    local cmd="${job_commands[$job_idx]}"
+    local desc="${job_descriptions[$job_idx]}"
+    local log_file="${BASE_OUTPUT}/job_${job_idx}.log"
+    
+    # Replace GPU placeholder with actual GPU ID
+    cmd="${cmd/GPU_PLACEHOLDER/$gpu_id}"
+    
+    echo "=========================================="
+    echo "Starting Job $((job_idx + 1))/$job_count"
+    echo "$desc | GPU: $gpu_id"
+    echo "Log: $log_file"
+    echo "=========================================="
+    
+    # Run the command and redirect output to log file
+    echo "command being run: $cmd"
+    eval "$cmd" > "$log_file" 2>&1
+    local exit_code=$?
+    
+    if [ $exit_code -eq 0 ]; then
+        echo "✓ Job $((job_idx + 1)) completed successfully on GPU $gpu_id"
+    else
+        echo "✗ Job $((job_idx + 1)) failed on GPU $gpu_id (exit code: $exit_code)"
+    fi
+    
+    return $exit_code
+}
+
+# Export functions and variables for parallel execution
+export -f run_job get_free_gpus
+export -a job_commands
+export -a job_descriptions
+export job_count BASE_OUTPUT
+
+echo "=========================================="
+echo "Starting parallel execution"
+echo "Dynamically detecting free GPUs for each batch"
+echo "=========================================="
+echo ""
+
+current_job=0
+batch_number=1
+
+# Run jobs until all are completed
+while [ $current_job -lt $job_count ]; do
+    # Get currently available GPUs
+    current_free_gpus=($(get_free_gpus))
+    available_gpu_count=${#current_free_gpus[@]}
+    
+    if [ $available_gpu_count -eq 0 ]; then
+        echo "No GPUs available, waiting 30 seconds..."
+        sleep 30
+        continue
+    fi
+    
+    echo "Batch $batch_number: Found $available_gpu_count free GPUs: ${current_free_gpus[*]}"
+    
+    # Calculate how many jobs to run in this batch
+    jobs_remaining=$((job_count - current_job))
+    jobs_in_batch=$((available_gpu_count < jobs_remaining ? available_gpu_count : jobs_remaining))
+    
+    echo "Starting $jobs_in_batch jobs (Jobs $((current_job+1)) to $((current_job+jobs_in_batch)))"
+    
+    # Start jobs in parallel on available GPUs
+    pids=()
+    for ((k=0; k<jobs_in_batch; k++)); do
+        job_idx=$((current_job + k))
+        gpu_id=${current_free_gpus[k]}
+        run_job $job_idx $gpu_id &
+        pids+=($!)
     done
     
-    # Rebuild arrays
-    job_pids=($(printf '%s\n' "${job_pids[@]}" | grep -v '^$'))
-    job_gpus=($(printf '%s\n' "${job_gpus[@]}" | grep -v '^$'))
-    running_jobs=($(printf '%s\n' "${running_jobs[@]}" | grep -v '^$'))
+    # Wait for all jobs in this batch to complete
+    for pid in "${pids[@]}"; do
+        wait $pid
+    done
     
-    if [ ${#job_pids[@]} -gt 0 ]; then
-        echo "Still waiting for ${#job_pids[@]} jobs: ${running_jobs[*]}"
+    current_job=$((current_job + jobs_in_batch))
+    batch_number=$((batch_number + 1))
+    
+    echo ""
+    echo "Batch $((batch_number - 1)) completed. $((job_count - current_job)) jobs remaining."
+    echo ""
+    
+    # Small delay to allow GPU memory to clear
+    if [ $current_job -lt $job_count ]; then
+        echo "Waiting 10 seconds for GPU memory to clear..."
         sleep 10
     fi
 done
 
-echo "All benchmarking jobs completed!"
+echo "=========================================="
+echo "All $job_count benchmark jobs completed"
+echo "=========================================="
