@@ -6,11 +6,11 @@
 GPU_ID=$1
 shift  # Remove GPU_ID from arguments, rest are benchmark args
 
-# Initialize conda
-source $(conda info --base)/etc/profile.d/conda.sh
+# Initialize micromamba
+eval "$(micromamba shell hook --shell bash)"
 
 # Activate the mapanything environment
-conda activate mapanything
+micromamba activate mapanything
 
 # Set CUDA environment variables
 export CUDA_VISIBLE_DEVICES=$GPU_ID

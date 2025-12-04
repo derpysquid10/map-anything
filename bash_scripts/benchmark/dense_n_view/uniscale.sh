@@ -20,16 +20,15 @@ get_free_gpus() {
 
 # Define the batch sizes and number of views to loop over
 batch_sizes_and_views=(
-    # "10 2 benchmark_518_eth3d_snpp_tav2"
+    "1 2 benchmark_518_eth3d_snpp_tav2"
     # "10 4 benchmark_518_eth3d_snpp_tav2"
-    # "10 8 benchmark_518_eth3d_snpp_tav2"
+    # "8 8 benchmark_518_eth3d_snpp_tav2"
     # "5 16 benchmark_518_eth3d_snpp_tav2"
-    "1 50 benchmark_518_eth3d_snpp_tav2"
-    "2 32 benchmark_518_eth3d_snpp_tav2"
+    # "1 50 benchmark_518_eth3d_snpp_tav2"
+    # "2 32 benchmark_518_eth3d_snpp_tav2"
     # "4 24 benchmark_518_eth3d_snpp_tav2"
     
     
-    # "1 100 benchmark_518_eth3d_snpp_tav2"
 )
 
 prior_combinations=(
@@ -40,7 +39,7 @@ prior_combinations=(
 )
 
 # Base output directory
-BASE_OUTPUT="/mnt/nfs/binbin/experiments_new_model/mapanything/benchmarking"
+BASE_OUTPUT="/mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n"
 
 # Get initial list of free GPUs
 echo "Detecting available GPUs..."
@@ -52,22 +51,70 @@ if [ ${#free_gpus[@]} -eq 0 ]; then
     exit 1
 fi
 
-NUM_GPUS=${#free_gpus[@]}
+# Arrays to track running jobs
+declare -a job_pids=()
+declare -a job_gpus=()
+declare -a running_jobs=()
 
-# Counter for tracking jobs
-job_count=0
+# Function to run a single benchmark job
+run_benchmark_job() {
+    local gpu=$1
+    local batch_size=$2
+    local num_views=$3
+    local dataset=$4
+    local prior_combo=$5
+    local prior_dir_name=$6
+    
+    echo "Starting job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
+    
+    /mnt/nfs/slurm/home/gordon/map-anything/run_benchmark_with_conda.sh $gpu \
+        benchmarking/dense_n_view/benchmark.py \
+        machine=default \
+        dataset=$dataset \
+        dataset.num_workers=16 \
+        dataset.num_views=$num_views \
+        batch_size=$batch_size \
+        model=pow3r_vggt \
+        model.model_config.load_custom_ckpt=true \
+        model.model_config.custom_ckpt_path="/mnt/glusterfs/SpatialAI/Experiments/gordon/weights/uniscale/longer_training_cont/checkpoint_2_50000.pt" \
+        hydra.run.dir='/mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_'"${num_views}"'_view/longer_training_base_150k_'"${prior_dir_name}" \
+        input_priors=$prior_combo \
+        dataset.principal_point_centered=true
+    
+    echo "Finished job on GPU $gpu: $dataset with batch_size=$batch_size, num_views=$num_views, input_priors=$prior_combo"
+}
+# Function to wait for a free GPU and clean up finished jobs
+wait_for_free_gpu() {
+    while true; do
+        # Check for finished jobs
+        for i in "${!job_pids[@]}"; do
+            if ! kill -0 "${job_pids[i]}" 2>/dev/null; then
+                echo "Job ${running_jobs[i]} on GPU ${job_gpus[i]} has finished"
+                unset job_pids[i]
+                unset job_gpus[i]
+                unset running_jobs[i]
+            fi
+        done
+        
+        # Rebuild arrays to remove gaps
+        job_pids=($(printf '%s\n' "${job_pids[@]}" | grep -v '^$'))
+        job_gpus=($(printf '%s\n' "${job_gpus[@]}" | grep -v '^$'))
+        running_jobs=($(printf '%s\n' "${running_jobs[@]}" | grep -v '^$'))
+        
+        # Try to find a free GPU
+        local available_gpu=$(get_next_gpu "${free_gpus[*]}" "${job_gpus[@]}")
+        if [[ -n "$available_gpu" ]]; then
+            echo $available_gpu
+            return
+        fi
+        
+        echo "All GPUs busy, waiting..."
+        sleep 10
+    done
+}
 
-# Arrays to store all job commands
-declare -a job_commands
-declare -a job_descriptions
-
-echo "=========================================="
-echo "Preparing benchmark jobs"
-echo "Running jobs in parallel across $NUM_GPUS GPUs"
-echo "=========================================="
-echo ""
-
-# Build all job commands first (without GPU assignment)
+# Generate all job combinations
+declare -a all_jobs=()
 for combo in "${batch_sizes_and_views[@]}"; do
     read -r batch_size num_views dataset <<< "$combo"
     for prior_combo in "${prior_combinations[@]}"; do
@@ -77,7 +124,7 @@ for combo in "${batch_sizes_and_views[@]}"; do
         fi
         
         # Build the command template (GPU will be assigned dynamically)
-        cmd="/workspace/run_benchmark_with_conda.sh GPU_PLACEHOLDER"
+        cmd="/mnt/nfs/slurm/home/gordon/map-anything/run_benchmark_with_conda.sh GPU_PLACEHOLDER"
         cmd="$cmd benchmarking/dense_n_view/benchmark.py"
         cmd="$cmd machine=default"
         cmd="$cmd dataset=$dataset"
@@ -86,8 +133,8 @@ for combo in "${batch_sizes_and_views[@]}"; do
         cmd="$cmd batch_size=$batch_size"
         cmd="$cmd model=pow3r_vggt"
         cmd="$cmd model.model_config.load_custom_ckpt=true"
-        cmd="$cmd model.model_config.custom_ckpt_path=\"/mnt/nfs/binbin/gtan_weights/no_scale_head/checkpoint_0_38000.pt\""
-        cmd="$cmd hydra.run.dir='${BASE_OUTPUT}/dense_${num_views}_view/ablation_noscalehead_${prior_dir_name}'"
+        cmd="$cmd model.model_config.custom_ckpt_path=\"/mnt/glusterfs/SpatialAI/Experiments/gordon/weights/uniscale/longer_training_cont/checkpoint_2_50000.pt\""
+        cmd="$cmd hydra.run.dir='${BASE_OUTPUT}/dense_${num_views}_view/longer_training_base_150k_${prior_dir_name}'"
         cmd="$cmd input_priors=$prior_combo"
         cmd="$cmd dataset.principal_point_centered=true"
         
@@ -122,10 +169,10 @@ run_job() {
     echo "Log: $log_file"
     echo "=========================================="
     
-    # Run the command and redirect output to log file
+    # Run the command and redirect output to both console and log file
     echo "command being run: $cmd"
-    eval "$cmd" > "$log_file" 2>&1
-    local exit_code=$?
+    eval "$cmd" 2>&1 | tee "$log_file"
+    local exit_code=${PIPESTATUS[0]}
     
     if [ $exit_code -eq 0 ]; then
         echo "✓ Job $((job_idx + 1)) completed successfully on GPU $gpu_id"

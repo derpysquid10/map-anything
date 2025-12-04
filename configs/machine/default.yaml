@@ -5,7 +5,7 @@ mapanything_dataset_metadata_dir: /mnt/nfs/SpatialAI/wai_datasets/map-anything/m
 # Root directory containing pretrained checkpoints for custom models
 root_pretrained_checkpoints_dir: /work/weights
 # Root directory to log experiments
-root_experiments_dir: /home/binbin/gtan/mapanything_experiments
+root_experiments_dir: /mnt/nfs/slurm/home/gordon/experiments/mapanything
 # Root directory containing UniCeption pretrained checkpoints
 root_uniception_pretrained_checkpoints_dir: ???
 # Root directory containing external benchmark data
