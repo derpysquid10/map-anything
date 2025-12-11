@@ -64,7 +64,7 @@ class DL3DVWAI(BaseDataset):
         self.is_synthetic = False
 
     def _load_data(self):
-        "Load the precomputed dataset metadata"
+        "Load the precomputed dataset metadata and validate scenes"
         # Load the dataset metadata corresponding to the split
         split_metadata_path = os.path.join(
             self.dataset_metadata_dir,
@@ -73,9 +73,24 @@ class DL3DVWAI(BaseDataset):
         )
         split_scene_list = np.load(split_metadata_path, allow_pickle=True)
 
+        # Filter scenes to only include those with valid scene_meta.json
+        valid_scenes = []
+        invalid_count = 0
+        for scene_name in split_scene_list:
+            scene_path = os.path.join(self.ROOT, scene_name)
+            scene_meta_path = os.path.join(scene_path, "scene_meta.json")
+            if os.path.exists(scene_meta_path):
+                valid_scenes.append(scene_name)
+            else:
+                invalid_count += 1
+
+        if invalid_count > 0:
+            print(f"DL3DV {self.split}: Filtered out {invalid_count} scenes with missing scene_meta.json")
+        print(f"DL3DV {self.split}: Using {len(valid_scenes)} valid scenes")
+
         # Get the list of all scenes
         if not self.sample_specific_scene:
-            self.scenes = list(split_scene_list)
+            self.scenes = list(valid_scenes)
         else:
             self.scenes = [self.specific_scene_name]
         self.num_of_scenes = len(self.scenes)
@@ -94,7 +109,8 @@ class DL3DVWAI(BaseDataset):
         num_views_in_scene = len(scene_file_names)
 
         # Load the scene pairwise covisibility mmap
-        covisibility_version_key = "v0_mvsa_based"
+        covisibility_version_key = "v0"
+        # covisibility_version_key="v0_mvsa_based",
         covisibility_map_dir = os.path.join(
             scene_root, "covisibility", covisibility_version_key
         )

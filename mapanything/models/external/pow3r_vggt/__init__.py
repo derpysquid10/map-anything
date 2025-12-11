@@ -252,9 +252,16 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         intermediate_layer_idx=[4, 11, 17, 23],
         load_custom_ckpt=False,
         custom_ckpt_path=None,
+        enable_camera=True,
+        enable_depth=True,
+        enable_point=True,
+        enable_track=False,
         enable_scale=True,
+        enable_ray=False,
         scale_head_type="ScaleHead_MLP_LCP",
         input_priors=None,
+        geometric_input_config=None,
+        ablation=None,
     ):
         super().__init__()
         self.name = name
@@ -262,13 +269,27 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         self.load_custom_ckpt = load_custom_ckpt
         self.custom_ckpt_path = custom_ckpt_path
 
-        # Store input priors configuration
+        # Store input priors configuration (legacy support)
         if input_priors is None:
             self.input_priors = []
         else:
             self.input_priors = (
                 input_priors if isinstance(input_priors, list) else [input_priors]
             )
+
+        # Store geometric input configuration for probabilistic conditioning
+        if geometric_input_config is not None:
+            self.geometric_input_config = geometric_input_config
+        else:
+            # Default config for backward compatibility
+            self.geometric_input_config = {
+                "ray_dirs_prob": 1.0,
+                "cam_prob": 1.0,
+                "overall_prob": 1.0,
+                "dropout_prob": 0.0,
+                "depth_prob": 1.0,
+                "depth_sparsification": 0.1,
+            }
 
         # Determine dtype based on GPU capability (same pattern as VGGT)
         if torch.cuda.is_available():
@@ -295,9 +316,27 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             with open(yaml_file, "r") as f:
                 print(f"opening config file at path: {yaml_file}")
                 model_config = OmegaConf.load(f)
+
+            # Use ablation from checkpoint if available, otherwise use provided ablation parameter
+            checkpoint_ablation = model_config.model.ablation if hasattr(model_config.model, 'ablation') else ablation
+            final_ablation = checkpoint_ablation if checkpoint_ablation is not None else ablation
+
+            # Convert dict/DictConfig to ModelArgs
+            if final_ablation is not None and not isinstance(final_ablation, ModelArgs):
+                # Create ModelArgs and populate from dict
+                model_args = ModelArgs()
+                for key, value in final_ablation.items():
+                    setattr(model_args, key, value)
+                final_ablation = model_args
+
             self.model = Pow3rVGGT(
-                ablation=model_config.model.ablation,
+                ablation=final_ablation,
+                enable_camera=enable_camera,
+                enable_depth=enable_depth,
+                enable_point=enable_point,
+                enable_track=enable_track,
                 enable_scale=enable_scale,
+                enable_ray=enable_ray,
                 scale_head_type=scale_head_type,
             )
 
@@ -315,13 +354,41 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
             load_result = self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded checkpoint: {load_result}")
+
+            # Check for scale_head loading issues
+            if load_result.missing_keys:
+                scale_head_missing = [k for k in load_result.missing_keys if 'scale_head' in k]
+                if scale_head_missing:
+                    print(f"WARNING: Scale head keys missing from checkpoint: {scale_head_missing}")
+            if load_result.unexpected_keys:
+                scale_head_unexpected = [k for k in load_result.unexpected_keys if 'scale_head' in k]
+                if scale_head_unexpected:
+                    print(f"WARNING: Unexpected scale head keys in checkpoint: {scale_head_unexpected}")
+
             del custom_ckpt, state_dict  # in case it occupies memory
 
         else:
-            args = ModelArgs()
+            # Use provided ablation config, or default ModelArgs if not provided
+            if ablation is None:
+                final_ablation = ModelArgs()
+            else:
+                # Convert dict/DictConfig to ModelArgs
+                if not isinstance(ablation, ModelArgs):
+                    model_args = ModelArgs()
+                    for key, value in ablation.items():
+                        setattr(model_args, key, value)
+                    final_ablation = model_args
+                else:
+                    final_ablation = ablation
+
             self.model = Pow3rVGGT(
-                ablation=args,
+                ablation=final_ablation,
+                enable_camera=enable_camera,
+                enable_depth=enable_depth,
+                enable_point=enable_point,
+                enable_track=enable_track,
                 enable_scale=enable_scale,
+                enable_ray=enable_ray,
                 scale_head_type=scale_head_type,
             )
             self.default_path = "/work/weights/vggt/model.pt"
@@ -340,18 +407,18 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
             load_result = self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded checkpoint: {load_result}")
-            del custom_ckpt, state_dict  # in case it occupies memory
 
-        # Add geometric_input_config for RMVD adapter compatibility
-        # Pow3r-VGGT always uses conditioning when provided (no dropout)
-        # These values will be set by RMVD adapter based on evaluation_conditioning
-        self.geometric_input_config = {
-            "ray_dirs_prob": 1.0,  # Probability of using intrinsics (ray directions)
-            "cam_prob": 1.0,  # Probability of using camera poses
-            "overall_prob": 1.0,  # Overall probability of using geometric inputs
-            "dropout_prob": 0.0,  # Dropout probability (0 = always use when available)
-            "depth_sparsification": 0.1,
-        }
+            # Check for scale_head loading issues
+            if load_result.missing_keys:
+                scale_head_missing = [k for k in load_result.missing_keys if 'scale_head' in k]
+                if scale_head_missing:
+                    print(f"WARNING: Scale head keys missing from checkpoint: {scale_head_missing}")
+            if load_result.unexpected_keys:
+                scale_head_unexpected = [k for k in load_result.unexpected_keys if 'scale_head' in k]
+                if scale_head_unexpected:
+                    print(f"WARNING: Unexpected scale head keys in checkpoint: {scale_head_unexpected}")
+
+            del custom_ckpt, state_dict  # in case it occupies memory
 
     def forward(self, views):
         """
@@ -439,6 +506,9 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             poses_4x4[:, :, :3, :] = poses
             poses_4x4[:, :, 3, 3] = 1.0  # Set bottom-right to 1
 
+            # # convert poses from cam2world to world2cam
+            # poses_4x4 = torch.inverse(poses_4x4)
+
             # Get inverse of first pose for each batch
             first_pose_inv = torch.inverse(poses_4x4[:, 0])  # (B, 4, 4)
             first_pose_inv = first_pose_inv.unsqueeze(1)  # (B, 1, 4, 4)
@@ -512,22 +582,65 @@ class Pow3rVGGTWrapper(torch.nn.Module):
         #     depths_along_ray = depths_along_ray.squeeze(-1)  # (B, S, H, W)
 
         # Convert input format to what the model expects
-        # Use input_priors to control which inputs are passed to the model
+        # Apply probabilistic dropout to geometric inputs during training
         model_intrinsics = None
         model_poses = None
         model_depths = None
 
-        if "intrinsics" in self.input_priors and intrinsics is not None:
-            model_intrinsics = intrinsics.to(images.device)
-            # print("using intrinsics")
+        # Get probabilities from config
+        overall_prob = self.geometric_input_config.get("overall_prob", 1.0)
+        ray_dirs_prob = self.geometric_input_config.get("ray_dirs_prob", 1.0)
+        cam_prob = self.geometric_input_config.get("cam_prob", 1.0)
+        depth_prob = self.geometric_input_config.get("depth_prob", 1.0)
 
-        if "extrinsics" in self.input_priors and poses is not None:
-            model_poses = poses.to(images.device)
-            # print(model_poses)
-            # print("using extrinsics")
+        if self.training:
+            # Training mode: apply probabilistic dropout
+            # First, determine if we use geometric inputs at all
+            use_geometric_inputs = torch.rand(1).item() < overall_prob
 
-        if depths_z is not None:
-            model_depths = depths_z.to(images.device)
+            if use_geometric_inputs:
+                # Legacy input_priors support (deterministic)
+                if len(self.input_priors) > 0:
+                    if "intrinsics" in self.input_priors and intrinsics is not None:
+                        model_intrinsics = intrinsics.to(images.device)
+
+                    if "extrinsics" in self.input_priors and poses is not None:
+                        model_poses = poses.to(images.device)
+                        print(model_poses)
+
+                    if "depths" in self.input_priors and depths_z is not None:
+                        model_depths = depths_z.to(images.device)
+                else:
+                    # Probabilistic conditioning: apply individual probabilities
+                    if intrinsics is not None and torch.rand(1).item() < ray_dirs_prob:
+                        model_intrinsics = intrinsics.to(images.device)
+
+                    if poses is not None and torch.rand(1).item() < cam_prob:
+                        model_poses = poses.to(images.device)
+
+                    if depths_z is not None and torch.rand(1).item() < depth_prob:
+                        model_depths = depths_z.to(images.device)
+        else:
+            # Evaluation mode: use all available inputs (or respect input_priors if specified)
+            if len(self.input_priors) > 0:
+                if "intrinsics" in self.input_priors and intrinsics is not None:
+                    model_intrinsics = intrinsics.to(images.device)
+
+                if "extrinsics" in self.input_priors and poses is not None:
+                    model_poses = poses.to(images.device)
+
+                if "depths" in self.input_priors and depths_z is not None:
+                    model_depths = depths_z.to(images.device)
+            else:
+                # Use all available inputs during evaluation
+                if intrinsics is not None:
+                    model_intrinsics = intrinsics.to(images.device)
+
+                if poses is not None:
+                    model_poses = poses.to(images.device)
+
+                if depths_z is not None:
+                    model_depths = depths_z.to(images.device)
 
         # Run the Pow3r-VGGT model with new interface
         with torch.autocast("cuda", dtype=self.dtype):
@@ -548,10 +661,27 @@ class Pow3rVGGTWrapper(torch.nn.Module):
             depth_map = model_output["depth"]  # (B, V, H, W, 1)
             depth_conf = model_output["depth_conf"]  # (B, V, H, W)
             scale = model_output["scale"]  # Scale predictions
-            scale = scale.view(-1, 1, 1, 1, 1)
 
-            # Multiply depth map by scale
-            depth_map = depth_map * scale  # (B, V, H, W, 1)
+            print(f"DEBUG: scale shape from model = {scale.shape}")
+
+            # Extract scale factor - handle different possible shapes
+            # Scale could be (B,), (B, 1), or (B, num_views)
+            if scale.ndim == 1:
+                # Already (B,)
+                metric_scaling_factor = scale
+            elif scale.ndim == 2:
+                if scale.shape[1] == 1:
+                    # (B, 1) -> (B,)
+                    metric_scaling_factor = scale.squeeze(-1)
+                else:
+                    # (B, num_views) -> (B,) by taking mean across views
+                    metric_scaling_factor = scale.mean(dim=-1)
+            else:
+                # Scalar - make it (B,) with batch size 1
+                metric_scaling_factor = scale.unsqueeze(0) if scale.ndim == 0 else scale
+
+            # Keep depth_map unscaled - we'll scale outputs explicitly later
+            # This matches MapAnything's pattern
 
             # Extrinsic and intrinsic matrices from pose encoding
             extrinsic, intrinsic = pose_encoding_to_extri_intri(
@@ -578,12 +708,7 @@ class Pow3rVGGTWrapper(torch.nn.Module):
 
                 # Convert the extrinsics to quaternions and translations
                 translation = curr_view_extrinsic[..., :3, 3]
-                scale_for_view = (
-                    scale[:, view_idx, 0, 0, 0]
-                    if scale.shape[1] > view_idx
-                    else scale[:, 0, 0, 0, 0]
-                )
-                curr_view_cam_translations = translation * scale_for_view.unsqueeze(-1)
+                curr_view_cam_translations = translation  # Unscaled - will scale at output
                 curr_view_cam_quats = mat_to_quat(curr_view_extrinsic[..., :3, :3])
 
                 # Convert the z depth to depth along ray
@@ -608,15 +733,17 @@ class Pow3rVGGTWrapper(torch.nn.Module):
                 )
 
                 # Append the outputs to the result list in MapAnything format
+                # Scale all spatial quantities explicitly (matching MapAnything's pattern)
                 res.append(
                     {
-                        "pts3d": curr_view_pts3d,
-                        "pts3d_cam": curr_view_pts3d_cam,
-                        "ray_directions": curr_view_ray_dirs,
-                        "depth_along_ray": curr_view_depth_along_ray,
-                        "cam_trans": curr_view_cam_translations,
-                        "cam_quats": curr_view_cam_quats,
+                        "pts3d": curr_view_pts3d * metric_scaling_factor.unsqueeze(-1).unsqueeze(-1),
+                        "pts3d_cam": curr_view_pts3d_cam * metric_scaling_factor.unsqueeze(-1).unsqueeze(-1),
+                        "ray_directions": curr_view_ray_dirs,  # NOT scaled (normalized)
+                        "depth_along_ray": curr_view_depth_along_ray * metric_scaling_factor.unsqueeze(-1).unsqueeze(-1),
+                        "cam_trans": curr_view_cam_translations * metric_scaling_factor.unsqueeze(-1),
+                        "cam_quats": curr_view_cam_quats,  # NOT scaled (normalized)
                         "conf": curr_view_confidence,
+                        "metric_scaling_factor": metric_scaling_factor,  # Raw scale for loss
                     }
                 )
 

@@ -470,6 +470,7 @@ def train_one_epoch(
             amp_dtype=args.train_params.amp_dtype,
             ret="loss",
         )
+   
         loss, loss_details = loss_tuple  # criterion returns two values
         if n_views > 2:
             loss = loss * (

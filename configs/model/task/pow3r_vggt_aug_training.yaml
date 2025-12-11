@@ -1,0 +1,73 @@
+# Probabilistic input configuration for Pow3r-VGGT training
+# This config enables stochastic conditioning on geometric inputs
+
+# ============================================================================
+# PROBABILISTIC INPUT CONDITIONING (for training)
+# ============================================================================
+# Overall Probability of Geometric Inputs
+overall_prob: 0.0
+# Dropout Probability of Geometric Inputs (for each sample across batch size and number of views)
+dropout_prob: 0.0
+# Probability of Geometric Inputs with Ray Directions (intrinsics)
+ray_dirs_prob: 0.5
+# Probability of Geometric Inputs with Depths
+depth_prob: 0.5
+# Probability of Geometric Inputs with Camera Poses (extrinsics)
+cam_prob: 0.5
+# Probability of sparsely sampling the high quality gt depth
+sparse_depth_prob: 1.0
+# Percentage of the valid depth to remove if the probability of using sparse depth is greater than 0 (Range: [0, 1])
+sparsification_removal_percent: 0.9
+# Probability for skipping input of the metric scale quantities for the input metric high quality gt depth
+# If 0, the metric scale quantities will be provided as input to the model for all the metric scale conditionings
+depth_scale_norm_all_prob: 1
+# Probability for skipping input of the metric scale quantities for the input metric pose
+# If 0, the metric scale quantities will be provided as input to the model for all the metric scale conditionings
+pose_scale_norm_all_prob: 1
+
+# ============================================================================
+# MODEL HEAD CONFIGURATION
+# ============================================================================
+enable_camera: true
+enable_depth: true
+enable_point: true
+enable_track: false
+enable_scale: true
+enable_ray: false
+scale_head_type: "ScaleHead_MLP_LCP"
+
+# ============================================================================
+# ABLATION CONFIGURATION
+# ============================================================================
+ablation:
+  # Using priors in training (deprecated - probabilistic probs above are preferred)
+  enable_train_poses_prior: true
+  enable_train_depths_prior: false
+  enable_train_intrinsics_prior: true
+
+  # Using priors in validation (deprecated - probabilistic probs above are preferred)
+  enable_val_poses_prior: true
+  enable_val_depths_prior: false
+  enable_val_intrinsics_prior: true
+
+  # Architecture ablations
+  skip_connections: null
+  special_attention_skip_connections: null
+
+  # Encoder configurations
+  pose_encoder_type: "6D"
+  intrinsics_encoder_type: ["raymap"]  # Options: [raymap], [prope, raymap], [raymap, origin], etc.
+
+  # VGGT-specific settings
+  use_vggt_rope: true
+  encode_pose_in_register: false
+
+  # Normalization and decomposition settings
+  normalize_raymap: false
+  decompose_pose_scale: false
+  decompose_depth_scale: false
+  log_norm_depth_prior: false
+
+  # Ray head configuration
+  ray_head_inputs:
+    fuse_cam_patch_tokens: false

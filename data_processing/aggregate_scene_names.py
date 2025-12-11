@@ -270,7 +270,8 @@ class DL3DVAggregator(DatasetAggregator):
         self,
         root_dir,
         output_dir,
-        covisibility_version_key="v0_mvsa_based",
+        covisibility_version_key="v0",
+        # covisibility_version_key="v0_mvsa_based",
         raw_data_root_dir=None,
     ):
         super().__init__(

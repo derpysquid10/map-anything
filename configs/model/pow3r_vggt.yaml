@@ -1,6 +1,10 @@
+defaults:
+  - task: images_only
+
 # String for model factory
 model_str: "pow3r_vggt"
-# Model config
+
+# Model config - FIXED base configuration
 model_config:
   name: "pow3r_vggt"
   # Load pre-trained weights
@@ -9,6 +13,19 @@ model_config:
   load_custom_ckpt: false
   # Custom checkpoint path
   custom_ckpt_path: null
+  # Geometric input configuration (from task)
+  geometric_input_config: ${model.task}
+  # Ablation configuration (from task)
+  ablation: ${model.task.ablation}
+  # Head enables (from task)
+  enable_camera: ${model.task.enable_camera}
+  enable_depth: ${model.task.enable_depth}
+  enable_point: ${model.task.enable_point}
+  enable_track: ${model.task.enable_track}
+  enable_scale: ${model.task.enable_scale}
+  enable_ray: ${model.task.enable_ray}
+  scale_head_type: ${model.task.scale_head_type}
+
 # Image Normalization Type
 data_norm_type: "identity"
 # VGGT checkpoint is already loaded in the inference wrapper

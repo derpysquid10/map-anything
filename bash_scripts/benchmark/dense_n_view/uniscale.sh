@@ -18,18 +18,26 @@ get_free_gpus() {
     tr '\n' ' '
 }
 
-# Define the batch sizes and number of views to loop over
-batch_sizes_and_views=(
-    "1 2 benchmark_518_eth3d_snpp_tav2"
-    # "10 4 benchmark_518_eth3d_snpp_tav2"
-    # "8 8 benchmark_518_eth3d_snpp_tav2"
-    # "5 16 benchmark_518_eth3d_snpp_tav2"
-    # "1 50 benchmark_518_eth3d_snpp_tav2"
-    # "2 32 benchmark_518_eth3d_snpp_tav2"
-    # "4 24 benchmark_518_eth3d_snpp_tav2"
-    
-    
-)
+# Get parameters from environment variables (set by dense_n_worker.sh)
+# If not set, use defaults for standalone execution
+batch_size=${BENCHMARK_BATCH_SIZE:-1}
+num_views=${BENCHMARK_NUM_VIEWS:-2}
+dataset=${BENCHMARK_DATASET:-benchmark_518_eth3d_snpp_tav2}
+model_type=${BENCHMARK_MODEL_TYPE:-pow3r_vggt}
+checkpoint_path=${BENCHMARK_CHECKPOINT_PATH:-/mnt/glusterfs/SpatialAI/Experiments/gordon/weights/uniscale/longer_training_cont/checkpoint_2_50000.pt}
+base_output_dir=${BENCHMARK_OUTPUT_DIR:-/mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n}
+
+echo "=========================================="
+echo "Uniscale.sh Configuration"
+echo "=========================================="
+echo "Batch size: ${batch_size}"
+echo "Num views: ${num_views}"
+echo "Dataset: ${dataset}"
+echo "Model type: ${model_type}"
+echo "Checkpoint: ${checkpoint_path}"
+echo "Base output dir: ${base_output_dir}"
+echo "=========================================="
+echo ""
 
 prior_combinations=(
     "[]"
@@ -37,9 +45,6 @@ prior_combinations=(
     "[extrinsics]"
     "[intrinsics,extrinsics]"
 )
-
-# Base output directory
-BASE_OUTPUT="/mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n"
 
 # Get initial list of free GPUs
 echo "Detecting available GPUs..."
@@ -113,44 +118,44 @@ wait_for_free_gpu() {
     done
 }
 
-# Generate all job combinations
-declare -a all_jobs=()
-for combo in "${batch_sizes_and_views[@]}"; do
-    read -r batch_size num_views dataset <<< "$combo"
-    for prior_combo in "${prior_combinations[@]}"; do
-        prior_dir_name=$(echo "$prior_combo" | sed 's/\[\]//g' | sed 's/\[//g' | sed 's/\]//g' | sed 's/,/_/g')
-        if [ -z "$prior_dir_name" ]; then
-            prior_dir_name="no_priors"
-        fi
-        
-        # Build the command template (GPU will be assigned dynamically)
-        cmd="/mnt/nfs/slurm/home/gordon/map-anything/run_benchmark_with_conda.sh GPU_PLACEHOLDER"
-        cmd="$cmd benchmarking/dense_n_view/benchmark.py"
-        cmd="$cmd machine=default"
-        cmd="$cmd dataset=$dataset"
-        cmd="$cmd dataset.num_workers=16"
-        cmd="$cmd dataset.num_views=$num_views"
-        cmd="$cmd batch_size=$batch_size"
-        cmd="$cmd model=pow3r_vggt"
-        cmd="$cmd model.model_config.load_custom_ckpt=true"
-        cmd="$cmd model.model_config.custom_ckpt_path=\"/mnt/glusterfs/SpatialAI/Experiments/gordon/weights/uniscale/longer_training_cont/checkpoint_2_50000.pt\""
-        cmd="$cmd hydra.run.dir='${BASE_OUTPUT}/dense_${num_views}_view/longer_training_base_150k_${prior_dir_name}'"
-        cmd="$cmd input_priors=$prior_combo"
-        cmd="$cmd dataset.principal_point_centered=true"
-        
-        # Store command and description (GPU will be filled in later)
-        job_commands[$job_count]="$cmd"
-        job_descriptions[$job_count]="Dataset: $dataset | Batch: $batch_size | Views: $num_views | Priors: $prior_dir_name"
-        
-        job_count=$((job_count + 1))
-    done
+# Generate all job combinations for this configuration
+declare -a job_commands=()
+declare -a job_descriptions=()
+job_count=0
+
+for prior_combo in "${prior_combinations[@]}"; do
+    prior_dir_name=$(echo "$prior_combo" | sed 's/\[\]//g' | sed 's/\[//g' | sed 's/\]//g' | sed 's/,/_/g')
+    if [ -z "$prior_dir_name" ]; then
+        prior_dir_name="no_priors"
+    fi
+
+    # Build the command template (GPU will be assigned dynamically)
+    cmd="/mnt/nfs/slurm/home/gordon/map-anything/run_benchmark_with_conda.sh GPU_PLACEHOLDER"
+    cmd="$cmd benchmarking/dense_n_view/benchmark.py"
+    cmd="$cmd machine=default"
+    cmd="$cmd dataset=$dataset"
+    cmd="$cmd dataset.num_workers=16"
+    cmd="$cmd dataset.num_views=$num_views"
+    cmd="$cmd batch_size=$batch_size"
+    cmd="$cmd model=$model_type"
+    cmd="$cmd model.model_config.load_custom_ckpt=true"
+    cmd="$cmd model.model_config.custom_ckpt_path=\"$checkpoint_path\""
+    cmd="$cmd hydra.run.dir='${base_output_dir}_${prior_dir_name}'"
+    cmd="$cmd input_priors=$prior_combo"
+    cmd="$cmd dataset.principal_point_centered=true"
+
+    # Store command and description
+    job_commands[$job_count]="$cmd"
+    job_descriptions[$job_count]="Dataset: $dataset | Batch: $batch_size | Views: $num_views | Priors: $prior_dir_name"
+
+    job_count=$((job_count + 1))
 done
 
 echo "Total jobs to run: $job_count"
 echo ""
 
 # Create base output directory if it doesn't exist
-mkdir -p "$BASE_OUTPUT"
+mkdir -p "$base_output_dir"
 
 # Function to run a job with assigned GPU
 run_job() {
@@ -158,7 +163,7 @@ run_job() {
     local gpu_id=$2
     local cmd="${job_commands[$job_idx]}"
     local desc="${job_descriptions[$job_idx]}"
-    local log_file="${BASE_OUTPUT}/job_${job_idx}.log"
+    local log_file="${base_output_dir}/job_${job_idx}.log"
     
     # Replace GPU placeholder with actual GPU ID
     cmd="${cmd/GPU_PLACEHOLDER/$gpu_id}"
@@ -187,7 +192,7 @@ run_job() {
 export -f run_job get_free_gpus
 export -a job_commands
 export -a job_descriptions
-export job_count BASE_OUTPUT
+export job_count base_output_dir
 
 echo "=========================================="
 echo "Starting parallel execution"

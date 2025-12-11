@@ -56,14 +56,38 @@ class ASEWAI(BaseDataset):
         self.is_synthetic = True
 
     def _load_data(self):
-        "Load the precomputed dataset metadata"
-        # Load the dataset metadata corresponding to the split
-        split_metadata_path = os.path.join(
-            self.dataset_metadata_dir,
-            self.split,
-            f"ase_scene_list_{self.split}.npy",
-        )
-        split_scene_list = np.load(split_metadata_path, allow_pickle=True)
+        "Scan the actual directory and create 95/5 train/test split"
+        # Scan the ASE directory to find all available scenes
+        all_scenes = []
+        for scene_name in os.listdir(self.ROOT):
+            scene_path = os.path.join(self.ROOT, scene_name)
+            # Check if it's a directory and has scene_meta.json
+            if os.path.isdir(scene_path):
+                scene_meta_path = os.path.join(scene_path, "scene_meta.json")
+                if os.path.exists(scene_meta_path):
+                    all_scenes.append(scene_name)
+
+        # Sort for deterministic ordering
+        all_scenes = sorted(all_scenes)
+        num_total_scenes = len(all_scenes)
+
+        print(f"Found {num_total_scenes} valid ASE scenes in {self.ROOT}")
+
+        # Create 95/5 train/val split
+        num_train = int(num_total_scenes * 0.95)
+        train_scenes = all_scenes[:num_train]
+        val_scenes = all_scenes[num_train:]
+
+        print(f"Split: {len(train_scenes)} train, {len(val_scenes)} val scenes")
+
+        # Select scenes based on split
+        if self.split == "train":
+            split_scene_list = train_scenes
+        elif self.split == "val":
+            split_scene_list = val_scenes
+        else:
+            # For test split, use val scenes (or could create different split)
+            split_scene_list = val_scenes
 
         # Get the list of all scenes
         if not self.sample_specific_scene:

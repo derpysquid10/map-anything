@@ -5,12 +5,15 @@ def generate_raymap(
     intrinsics: torch.Tensor,
     *,
     normalize: bool = True,
+    pixel_center_offset: float = 0.5,
     device: torch.device | str | None = None,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Compute per-pixel camera-space ray directions (unit-length) for batched images.
-    
+
+    Uses inverse intrinsics method for efficient vectorized computation.
+
     Parameters
     ----------
     images : torch.Tensor
@@ -24,10 +27,13 @@ def generate_raymap(
              [ 0,  0,  1]]
     normalize : bool, optional
         If True, normalize ray directions to unit length. Default is True.
+    pixel_center_offset : float, optional
+        Offset for pixel centers. Use 0.5 for standard graphics convention
+        (ray through pixel center). Default is 0.0 for backward compatibility.
     device, dtype : optional
         If provided, the output will be moved / cast accordingly.
         (Defaults to images.device / images.dtype.)
-    
+
     Returns
     -------
     torch.Tensor
@@ -37,10 +43,10 @@ def generate_raymap(
     if images.dim() != 5:
         raise ValueError(f"images must have shape (B,N,C,H,W), got {images.shape}")
     B, N, _, H, W = images.shape
-    
+
     if intrinsics.shape != (B, N, 3, 3):
         raise ValueError(f"intrinsics must have shape (B,N,3,3) where B={B}, N={N}, got {intrinsics.shape}")
-    
+
     # ------------------------------------------------------------------
     # choose device / dtype
     # ------------------------------------------------------------------
@@ -48,48 +54,47 @@ def generate_raymap(
         device = images.device
     if dtype is None:
         dtype = images.dtype
-    
+
     K = intrinsics.to(device=device, dtype=dtype)
-    
-    # Extract intrinsics parameters for all images
-    fx = K[:, :, 0, 0]  # (B, N)
-    fy = K[:, :, 1, 1]  # (B, N)
-    cx = K[:, :, 0, 2]  # (B, N)
-    cy = K[:, :, 1, 2]  # (B, N)
-    
+
     # ------------------------------------------------------------------
-    # pixel grid in image coordinates
+    # Create pixel grid with optional center offset
     # ------------------------------------------------------------------
-    u = torch.arange(W, device=device, dtype=dtype)  # cols (x-axis)
-    v = torch.arange(H, device=device, dtype=dtype)  # rows (y-axis)
-    u, v = torch.meshgrid(u, v, indexing="xy")  # shapes (H,W)
-    
-    # Expand u, v to match batch dimensions
-    u = u.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    v = v.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    
+    v, u = torch.meshgrid(
+        torch.arange(H, dtype=dtype, device=device) + pixel_center_offset,
+        torch.arange(W, dtype=dtype, device=device) + pixel_center_offset,
+        indexing='ij'
+    )
+
+    # Flatten spatial dimensions: (H, W) -> (H*W,)
+    u_flat = u.reshape(-1)  # (H*W,)
+    v_flat = v.reshape(-1)  # (H*W,)
+    ones = torch.ones_like(u_flat)  # (H*W,) - homogeneous coordinate
+
+    # Stack to homogeneous pixel coordinates: (3, H*W)
+    pixels_hom = torch.stack([u_flat, v_flat, ones], dim=0)  # (3, H*W)
+
     # ------------------------------------------------------------------
-    # Compute rays for each image using its own intrinsics
+    # Compute rays using inverse intrinsics method
     # ------------------------------------------------------------------
-    # Reshape intrinsics parameters for broadcasting
-    fx = fx.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
-    fy = fy.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
-    cx = cx.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
-    cy = cy.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
-    
-    # Compute normalized coordinates
-    x = (u - cx) / fx  # (B, N, H, W)
-    y = (v - cy) / fy  # (B, N, H, W)
-    z = torch.ones_like(x)  # (B, N, H, W)
-    
-    # Stack to form ray directions
-    rays = torch.stack((x, y, z), dim=2)  # (B, N, 3, H, W)
-    
+    # Reshape intrinsics for batch multiplication: (B*N, 3, 3)
+    K_reshaped = K.reshape(B * N, 3, 3)
+
+    # Compute inverse of intrinsics
+    K_inv = torch.inverse(K_reshaped)  # (B*N, 3, 3)
+
+    # Unproject pixels to ray directions: K_inv @ [u, v, 1]^T
+    # (B*N, 3, 3) @ (3, H*W) -> (B*N, 3, H*W)
+    rays_flat = torch.matmul(K_inv, pixels_hom.unsqueeze(0).expand(B * N, -1, -1))
+
+    # Reshape to (B, N, 3, H, W)
+    rays = rays_flat.reshape(B, N, 3, H, W)
+
     # Normalize rays to unit length if requested
     if normalize:
         rays = rays / torch.linalg.norm(rays, dim=2, keepdim=True)
-    
-    return rays.to(device=device, dtype=dtype)
+
+    return rays
 
 def generate_origin_raymaps(
     images: torch.Tensor,
@@ -351,7 +356,6 @@ def generate_unified_raymap(
         return result
     
     elif raymap_format == "origin":
-        print("using origin raymaps")
         return generate_origin_raymaps(images, intrinsics, extrinsics, normalize=normalize, device=device, dtype=dtype)
     
     elif raymap_format == "plucker":

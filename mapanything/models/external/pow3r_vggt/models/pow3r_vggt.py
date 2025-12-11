@@ -41,13 +41,20 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
         enable_point=True,
         enable_depth=True,
         enable_track=True,
+        enable_ray=True,
         enable_scale=True,
         scale_head_type="ScaleHead_MLP_LCP",
         ablation=default_ablation(),
     ):
         super().__init__()
         self.scale_head_type = scale_head_type
+        self.ablation = ablation
 
+        # Get fuse_cam_patch_tokens from ablation.ray_head_inputs (defaults to False)
+        fuse_cam_patch_tokens = False
+        if hasattr(ablation, 'ray_head_inputs') and ablation.ray_head_inputs:
+            rhi = ablation.ray_head_inputs
+            fuse_cam_patch_tokens = rhi.get('fuse_cam_patch_tokens', False) if isinstance(rhi, dict) else getattr(rhi, 'fuse_cam_patch_tokens', False)
         self.aggregator = Pow3rAggregator(
             img_size=img_size,
             patch_size=patch_size,
@@ -76,6 +83,8 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
             if enable_depth
             else None
         )
+        self.ray_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="linear", conf_activation="sigmoid", fuse_cam_patch_tokens=fuse_cam_patch_tokens) if enable_ray else None
+
         self.track_head = (
             TrackHead(dim_in=2 * embed_dim, patch_size=patch_size)
             if enable_track
@@ -184,6 +193,14 @@ class Pow3rVGGT(nn.Module, PyTorchModelHubMixin):
                 )
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
+
+            if self.ray_head is not None:
+                # ignore Ray confidence
+                rays, _ = self.ray_head(
+                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                )
+                predictions["rays"] = rays
+                
             if self.scale_head is not None:
                 ## Normal Head
                 if "MoE" not in self.scale_head_type and self.scale_head_type != "none":

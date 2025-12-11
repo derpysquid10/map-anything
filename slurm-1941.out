@@ -1,0 +1,39 @@
+==========================================
+Submitting benchmark jobs to SLURM
+==========================================
+
+Submitting job 0: dense_2v_bs1
+  Batch size: 1
+  Num views: 2
+  Dataset: benchmark_518_eth3d_snpp_tav2
+  Output: /mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_2_view/ray_fuse_90k
+Submitted batch job 1942
+
+Submitting job 1: dense_4v_bs10
+  Batch size: 10
+  Num views: 4
+  Dataset: benchmark_518_eth3d_snpp_tav2
+  Output: /mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_4_view/ray_fuse_90k
+Submitted batch job 1943
+
+Submitting job 2: dense_8v_bs8
+  Batch size: 8
+  Num views: 8
+  Dataset: benchmark_518_eth3d_snpp_tav2
+  Output: /mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_8_view/ray_fuse_90k
+Submitted batch job 1944
+
+Submitting job 3: dense_16v_bs5
+  Batch size: 5
+  Num views: 16
+  Dataset: benchmark_518_eth3d_snpp_tav2
+  Output: /mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_16_view/ray_fuse_90k
+Submitted batch job 1945
+
+Submitting job 4: dense_50v_bs1
+  Batch size: 1
+  Num views: 50
+  Dataset: benchmark_518_eth3d_snpp_tav2
+  Output: /mnt/glusterfs/SpatialAI/Experiments/gordon/experiments/dense_n/dense_50_view/ray_fuse_90k
+sbatch: error: QOSMaxSubmitJobPerUserLimit
+sbatch: error: Batch job submission failed: Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)

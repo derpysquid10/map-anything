@@ -53,6 +53,7 @@ class DPTHead(nn.Module):
         pos_embed: bool = True,
         feature_only: bool = False,
         down_ratio: int = 1,
+        fuse_cam_patch_tokens: bool = False,
     ) -> None:
         super(DPTHead, self).__init__()
         self.patch_size = patch_size
@@ -62,8 +63,10 @@ class DPTHead(nn.Module):
         self.feature_only = feature_only
         self.down_ratio = down_ratio
         self.intermediate_layer_idx = intermediate_layer_idx
+        self.fuse_cam_patch_tokens = fuse_cam_patch_tokens
 
         self.norm = nn.LayerNorm(dim_in)
+        self.norm_fusion = nn.LayerNorm(2 * dim_in)
 
         # Projection layers for each output channel from tokens.
         self.projects = nn.ModuleList(
@@ -85,6 +88,11 @@ class DPTHead(nn.Module):
                 ),
             ]
         )
+
+        if fuse_cam_patch_tokens:
+            self.fusion_layers = nn.ModuleList(
+                [nn.Conv2d(in_channels=2 * dim_in, out_channels=dim_in, kernel_size=1, stride=1, padding=0) for layer in intermediate_layer_idx]
+            )
 
         self.scratch = _make_scratch(out_channels, features, expand=False)
 
@@ -202,18 +210,34 @@ class DPTHead(nn.Module):
         out = []
         dpt_idx = 0
 
-        for layer_idx in self.intermediate_layer_idx:
-            x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+        for fusion_layer, layer_idx in enumerate(self.intermediate_layer_idx):
+            patch_tokens = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
 
-            # Select frames if processing a chunk
+            # Apply frame chunking to patch_tokens if processing a chunk
             if frames_start_idx is not None and frames_end_idx is not None:
-                x = x[:, frames_start_idx:frames_end_idx]
+                patch_tokens = patch_tokens[:, frames_start_idx:frames_end_idx]
+
+            if self.fuse_cam_patch_tokens:
+                # Position 0 is the camera token (position 1+ are register tokens)
+                cam_tokens = aggregated_tokens_list[layer_idx][:, :, 0]
+                # Apply frame chunking to cam_tokens if processing a chunk
+                if frames_start_idx is not None and frames_end_idx is not None:
+                    cam_tokens = cam_tokens[:, frames_start_idx:frames_end_idx]
+                cam_tokens = cam_tokens.reshape(B, S, 1, -1).expand(-1, -1, patch_tokens.shape[2], -1)
+                combined_tokens = torch.cat((cam_tokens, patch_tokens), dim=-1)
+                x = combined_tokens
+                x = self.norm_fusion(x)
+            else:
+                x = patch_tokens
+                x = self.norm(x)
 
             x = x.reshape(B * S, -1, x.shape[-1])
 
-            x = self.norm(x)
-
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
+
+            # Apply fusion layer AFTER reshaping to spatial format [B*S, C, H, W]
+            if self.fuse_cam_patch_tokens:
+                x = self.fusion_layers[fusion_layer](x)
 
             x = self.projects[dpt_idx](x)
             if self.pos_embed:
@@ -221,6 +245,7 @@ class DPTHead(nn.Module):
             x = self.resize_layers[dpt_idx](x)
 
             out.append(x)
+            del x
             dpt_idx += 1
 
         # Fuse features from multiple layers.
